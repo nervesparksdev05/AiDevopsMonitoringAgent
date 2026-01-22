@@ -35,9 +35,17 @@ env/
 *.swp
 *.swo
 
+# Test files
+test_*.py
+clean_*.py
+generate_*.py
+
 # OS
 .DS_Store
 Thumbs.db
+
+# Prometheus data
+data/
 
 # Logs
 *.log

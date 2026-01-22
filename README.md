@@ -41,6 +41,16 @@ python pipeline.py
 python -m uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
+**Start the Frontend** (React dashboard):
+```bash
+cd frontend
+npm install  # First time only
+npm run dev
+```
+
+Frontend will run on: `http://localhost:5173`  
+Backend API will run on: `http://localhost:8080`
+
 ## Architecture
 
 ```

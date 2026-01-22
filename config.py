@@ -15,25 +15,17 @@ DB_NAME = os.getenv("MONGO_DB", "observability")
 ENV = os.getenv("ENV", "local")
 
 # LLM (Ollama)
-LLM_URL = os.getenv("LLM_URL", "http://124.123.18.150:11434/api/generate")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss:latest")
+LLM_URL = os.getenv("LLM_URL", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "")
 
-# Pipeline settings - DEMO MODE (for presentations)
+# Pipeline settings - ADJUSTED for better anomaly detection
 STEP = 5                     # Prometheus query step (seconds)
 COLLECT_WINDOW = 10          # Data collection window (seconds)
-LOOKBACK_MIN = 5             # Anomaly detection lookback (minutes)
-Z_THRESHOLD = 1.5            # ULTRA SENSITIVE for demo
-MIN_POINTS = 3               # Minimum data points for detection
+LOOKBACK_MIN = 10            # Anomaly detection lookback (minutes) - INCREASED to get more data points
+Z_THRESHOLD = 1.2            # SENSITIVE for demo - lowered to detect more anomalies
+MIN_POINTS = 2               # Minimum data points for detection - REDUCED from 3 to 2
 MAX_DOCS = 25
 
-# Metrics to collect
-METRICS = [
-    "process_resident_memory_bytes",
-    "process_open_fds",
-    "go_goroutines",
-    "go_memstats_alloc_bytes",
-    "process_cpu_seconds_total",
-]
 
 # SMTP Email Configuration
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
