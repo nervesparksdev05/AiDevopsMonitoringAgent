@@ -1,37 +1,59 @@
 const API_BASE_URL = 'http://localhost:8000';
 
 export const api = {
-    // Get stats
+    // Health & Stats
+    async getHealth() {
+        const response = await fetch(`${API_BASE_URL}/`);
+        if (!response.ok) throw new Error('Failed to fetch health status');
+        return response.json();
+    },
+
     async getStats() {
         const response = await fetch(`${API_BASE_URL}/stats`);
         if (!response.ok) throw new Error('Failed to fetch stats');
         return response.json();
     },
 
-    // Get anomalies
+    // Anomalies
     async getAnomalies(params = {}) {
-        const queryParams = new URLSearchParams(params).toString();
-        const url = `${API_BASE_URL}/anomalies${queryParams ? `?${queryParams}` : ''}`;
-        const response = await fetch(url);
+        const response = await fetch(`${API_BASE_URL}/anomalies`);
         if (!response.ok) throw new Error('Failed to fetch anomalies');
         return response.json();
     },
 
-    // Get RCA results
+    // RCA
     async getRCA(params = {}) {
-        const queryParams = new URLSearchParams(params).toString();
-        const url = `${API_BASE_URL}/rca${queryParams ? `?${queryParams}` : ''}`;
-        const response = await fetch(url);
+        const response = await fetch(`${API_BASE_URL}/rca`);
         if (!response.ok) throw new Error('Failed to fetch RCA');
         return response.json();
     },
 
-    // Get Prometheus metrics
-    async getPromMetrics(params = {}) {
-        const queryParams = new URLSearchParams(params).toString();
-        const url = `${API_BASE_URL}/prom-metrics${queryParams ? `?${queryParams}` : ''}`;
-        const response = await fetch(url);
-        if (!response.ok) throw new Error('Failed to fetch metrics');
+
+    // Email Config
+    async getEmailConfig() {
+        const response = await fetch(`${API_BASE_URL}/agent/email-config`);
+        if (!response.ok) throw new Error('Failed to fetch email config');
+        return response.json();
+    },
+
+    async updateEmailConfig(config) {
+        const response = await fetch(`${API_BASE_URL}/agent/email-config`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        if (!response.ok) throw new Error('Failed to update email config');
+        return response.json();
+    },
+
+    async sendTestEmail() {
+        const response = await fetch(`${API_BASE_URL}/agent/test-email`, {
+            method: 'POST'
+        });
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Failed to send test email');
+        }
         return response.json();
     },
 };

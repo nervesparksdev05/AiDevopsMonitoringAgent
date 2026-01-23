@@ -3,8 +3,6 @@ import './index.css';
 import Dashboard from './components/Dashboard';
 import Anomalies from './components/Anomalies';
 import RCAResults from './components/RCAResults';
-import Metrics from './components/Metrics';
-import AgentSettings from './components/AgentSettings';
 import EmailSettings from './components/EmailSettings';
 
 function App() {
@@ -12,11 +10,9 @@ function App() {
     { path: '/', name: 'Dashboard', icon: '📊' },
     { path: '/anomalies', name: 'Anomalies', icon: '🚨' },
     { path: '/rca', name: 'RCA Results', icon: '🔍' },
-    { path: '/metrics', name: 'Metrics', icon: '📋' },
   ];
 
   const settingsItems = [
-    { path: '/settings/agent', name: 'Agent Config', icon: '⚙️' },
     { path: '/settings/email', name: 'Email Alerts', icon: '📧' },
   ];
 
@@ -127,8 +123,6 @@ function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/anomalies" element={<Anomalies />} />
               <Route path="/rca" element={<RCAResults />} />
-              <Route path="/metrics" element={<Metrics />} />
-              <Route path="/settings/agent" element={<AgentSettings />} />
               <Route path="/settings/email" element={<EmailSettings />} />
             </Routes>
           </div>

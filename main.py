@@ -1,465 +1,567 @@
-import os
+"""
+AI DevOps Monitor - Updated with Agent Config & Email Settings
+Run: uvicorn main:app --port 8000 --reload
+
+MongoDB Collections:
+- metrics: Raw metrics from Prometheus
+- anomalies: Detected anomalies
+- rca: Root cause analysis
+- email_config: Email alert settings
+"""
 import sys
-import uuid
-import logging
-import logging.config
+import json
+import asyncio
+import smtplib
+import ssl
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
+from contextlib import asynccontextmanager
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from collections import deque
 
 import httpx
-from bson import ObjectId
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+import requests
+import certifi
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
 from prometheus_fastapi_instrumentator import Instrumentator
 from pymongo import MongoClient
+from pydantic import BaseModel
 
-load_dotenv()
-
-# ---------------- LOGGING ----------------
-def build_log_config(app_level: str = "DEBUG") -> Dict[str, Any]:
-    """
-    A single logging config shared by:
-    - app logger ("api")
-    - uvicorn.error
-    - uvicorn.access (the GET /metrics lines)
-    """
-    log_level = app_level.upper()
-
-    return {
-        "version": 1,
-        "disable_existing_loggers": False,
-        "formatters": {
-            "default": {
-                "format": "%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s"
-            },
-            "access": {
-                # keeps uvicorn access logs in uvicorn style
-                "format": "%(levelprefix)s %(client_addr)s - \"%(request_line)s\" %(status_code)s"
-            },
-        },
-        "handlers": {
-            "console": {
-                "class": "logging.StreamHandler",
-                "formatter": "default",
-                "stream": "ext://sys.stdout",
-            },
-            "file_api": {
-                "class": "logging.FileHandler",
-                "formatter": "default",
-                "filename": "api.log",
-                "mode": "a",
-                "encoding": "utf-8",
-            },
-            "access_console": {
-                "class": "logging.StreamHandler",
-                "formatter": "access",
-                "stream": "ext://sys.stdout",
-            },
-        },
-        "loggers": {
-            "api": {"handlers": ["console", "file_api"], "level": log_level, "propagate": False},
-
-            # Uvicorn logs
-            "uvicorn": {"handlers": ["console", "file_api"], "level": "INFO", "propagate": False},
-            "uvicorn.error": {"handlers": ["console", "file_api"], "level": "INFO", "propagate": False},
-
-            # This is what prints: INFO: 127.0.0.1:xxxxx - "GET /metrics HTTP/1.1" 200 OK
-            "uvicorn.access": {"handlers": ["access_console"], "level": "INFO", "propagate": False},
-
-            # Noisy libs
-            "pymongo": {"handlers": ["console", "file_api"], "level": "WARNING", "propagate": False},
-            "httpx": {"handlers": ["console", "file_api"], "level": "INFO", "propagate": False},
-        },
-        "root": {"handlers": ["console", "file_api"], "level": "INFO"},
-    }
-
-
-APP_LOG_LEVEL = os.getenv("APP_LOG_LEVEL", "DEBUG")
-logging.config.dictConfig(build_log_config(APP_LOG_LEVEL))
-logger = logging.getLogger("api")
-
-logger.info("=" * 80)
-logger.info("🚀 Initializing AI DevOps Monitoring API...")
-logger.info("=" * 80)
-
-# ---------------- FASTAPI ----------------
-app = FastAPI(
-    title="AI DevOps Monitoring API",
-    description="API for AI-powered monitoring with configurable targets and email alerts",
-    version="3.0.0",
+from config import (
+    PROM_URL, MONGO_URI, DB_NAME,
+    LLM_URL, LLM_MODEL,
+    MONITOR_INTERVAL, Z_THRESHOLD, MAX_DOCS,
+    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_EMAILS
 )
 
+# ============ MODELS ============
+class Target(BaseModel):
+    name: str
+    endpoint: str
+    job: str
+
+class EmailConfig(BaseModel):
+    enabled: bool
+    recipients: List[str]
+
+# Force unbuffered output
+def log(msg):
+    print(msg, flush=True)
+
+# ============ THRESHOLDS ============
+THRESHOLDS = {
+    "up": {"min": 1, "severity": "critical", "msg": "Service is DOWN"},
+    "cpu_usage": {"max": 80, "severity": "high", "msg": "High CPU usage"},
+    "memory_usage": {"max": 80, "severity": "high", "msg": "High memory usage"},
+    "http_request_duration_seconds": {"max": 5, "severity": "high", "msg": "High latency"},
+    "errors_total": {"max": 10, "severity": "high", "msg": "High error count"},
+    "disk_usage": {"max": 90, "severity": "critical", "msg": "Disk almost full"},
+}
+
+metric_history: Dict[str, deque] = {}
+
+# ============ DATABASE ============
+_mongo_client = None
+_db_connected = False
+
+def get_db():
+    global _mongo_client, _db_connected
+    try:
+        uri = (MONGO_URI or "").strip()
+        if not uri:
+            log("[MongoDB Error] MONGO_URI not set")
+            return None
+
+        if _mongo_client is None:
+            log("[MongoDB] Connecting...")
+            _mongo_client = MongoClient(
+                uri,
+                serverSelectionTimeoutMS=2000,
+                connectTimeoutMS=2000,
+                socketTimeoutMS=2000,
+                maxPoolSize=1
+            )
+            _db_connected = False
+
+        if not _db_connected:
+            _mongo_client[DB_NAME].list_collection_names()
+            _db_connected = True
+            log("[MongoDB] Connected!")
+
+        return _mongo_client[DB_NAME]
+    except Exception as e:
+        log(f"[MongoDB Error] {e}")
+        _mongo_client = None
+        _db_connected = False
+        return None
+
+def cleanup_collection(db, collection: str):
+    count = db[collection].count_documents({})
+    if count > MAX_DOCS:
+        old = list(db[collection].find().sort("timestamp", 1).limit(count - MAX_DOCS))
+        if old:
+            db[collection].delete_many({"_id": {"$in": [d["_id"] for d in old]}})
+            log(f"[cleanup] Removed {len(old)} old docs from {collection}")
+
+# ============ LLM ============
+def ask_llm(prompt: str) -> Optional[str]:
+    try:
+        log(f"[LLM] Calling {LLM_URL}...")
+        resp = requests.post(
+            f"{LLM_URL}/api/generate",
+            json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
+            timeout=30
+        )
+        log("[LLM] Response received")
+        return resp.json().get("response", "") if resp.ok else None
+    except requests.exceptions.Timeout:
+        log("[LLM] Timeout after 30s")
+        return None
+    except Exception as e:
+        log(f"[LLM] Error: {e}")
+        return None
+
+def parse_json(text: str) -> dict:
+    try:
+        s, e = text.find("{"), text.rfind("}") + 1
+        return json.loads(text[s:e]) if s != -1 and e > s else {}
+    except:
+        return {}
+
+# ============ PROMETHEUS ============
+async def fetch_metrics_from_target(target_url: str) -> List[Dict]:
+    """Fetch metrics from a specific target"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                f"{target_url}/api/v1/query",
+                params={"query": '{__name__=~".+"}'}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if data.get("status") != "success":
+                return []
+
+            metrics = []
+            for m in data.get("data", {}).get("result", []):
+                name = m.get("metric", {}).get("__name__", "")
+                if name.startswith(("prometheus_", "go_", "scrape_", "promhttp_")):
+                    continue
+                value = m.get("value", [None, None])[1]
+                instance = m.get("metric", {}).get("instance", "unknown")
+                if value is not None and value != "":
+                    try:
+                        metrics.append({"name": name, "value": float(value), "instance": instance})
+                    except:
+                        metrics.append({"name": name, "value": value, "instance": instance})
+            return metrics
+    except Exception as e:
+        log(f"[Prometheus] Error fetching from {target_url}: {e}")
+        return []
+
+async def fetch_metrics() -> List[Dict]:
+    """Fetch metrics from all configured targets"""
+    db = get_db()
+    if db is None:
+        return []
+
+    # Get all enabled targets from MongoDB
+    targets = list(db.targets.find({"enabled": True}))
+
+    # If no targets, use default PROM_URL
+    if not targets:
+        return await fetch_metrics_from_target(PROM_URL)
+
+    # Fetch from all targets
+    all_metrics = []
+    for target in targets:
+        target_url = f"http://{target['endpoint']}"
+        metrics = await fetch_metrics_from_target(target_url)
+        all_metrics.extend(metrics)
+
+    return all_metrics
+
+# ============ EMAIL ============
+def send_alert(subject: str, body: str):
+    db = get_db()
+    if db is None:
+        return False
+
+    # Get email config from MongoDB
+    config = db.email_config.find_one({})
+    if not config or not config.get("enabled"):
+        return False
+
+    recipients = config.get("recipients", [])
+    if not recipients or not SMTP_USER or not SMTP_PASSWORD:
+        return False
+
+    try:
+        msg = MIMEMultipart()
+        msg["Subject"] = subject
+        msg["From"] = SMTP_USER
+        msg["To"] = ", ".join(recipients)
+        msg.attach(MIMEText(body, "html"))
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        log(f"[Email] Error: {e}")
+        return False
+
+# ============ ANOMALY DETECTION ============
+def update_history(name: str, value: float):
+    if name not in metric_history:
+        metric_history[name] = deque(maxlen=10)
+    metric_history[name].append(value)
+
+def detect_anomalies(metrics: List[Dict]) -> List[Dict]:
+    anomalies = []
+
+    for m in metrics:
+        name, value = m["name"], m["value"]
+        instance = m.get("instance", "unknown")
+
+        if isinstance(value, (int, float)):
+            update_history(name, value)
+
+        # Threshold check
+        for pattern, rules in THRESHOLDS.items():
+            if pattern in name.lower():
+                try:
+                    val = float(value)
+                    if "min" in rules and val < rules["min"]:
+                        anomalies.append({
+                            "metric": name,
+                            "value": val,
+                            "instance": instance,
+                            "severity": rules["severity"],
+                            "reason": rules["msg"]
+                        })
+                    if "max" in rules and val > rules["max"]:
+                        anomalies.append({
+                            "metric": name,
+                            "value": val,
+                            "instance": instance,
+                            "severity": rules["severity"],
+                            "reason": rules["msg"]
+                        })
+                except:
+                    pass
+
+        # Z-score check
+        if isinstance(value, (int, float)) and name in metric_history:
+            history = list(metric_history[name])
+            if len(history) >= 5:
+                avg = sum(history) / len(history)
+                std = (sum((x - avg) ** 2 for x in history) / len(history)) ** 0.5
+                if std > 0:
+                    z = abs(value - avg) / std
+                    if z > Z_THRESHOLD:
+                        anomalies.append({
+                            "metric": name,
+                            "value": value,
+                            "instance": instance,
+                            "severity": "medium",
+                            "reason": f"Statistical outlier (z={z:.1f})"
+                        })
+
+    return anomalies
+
+# ============ LLM ANALYSIS ============
+async def get_llm_analysis(anomaly: Dict, metrics: List[Dict]) -> Dict:
+    context = "\n".join([f"- {m['name']}: {m['value']}" for m in metrics[:15]])
+
+    prompt = f"""Anomaly detected:
+Metric: {anomaly['metric']}
+Value: {anomaly['value']}
+Reason: {anomaly['reason']}
+
+Context:
+{context}
+
+Respond JSON only:
+{{"summary": "one line description", "cause": "root cause", "fix": "how to fix"}}"""
+
+    resp = await asyncio.get_event_loop().run_in_executor(None, ask_llm, prompt)
+    return parse_json(resp) if resp else {"summary": anomaly["reason"], "cause": "Unknown", "fix": "Investigate"}
+
+# ============ MONITOR LOOP ============
+async def monitor():
+    log("[Monitor] Starting monitor loop...")
+    await asyncio.sleep(2)
+
+    while True:
+        ts = datetime.now().strftime("%H:%M:%S")
+
+        try:
+            db = get_db()
+
+            # 1. Fetch metrics from all targets
+            metrics = await fetch_metrics()
+            if not metrics:
+                log(f"[{ts}] No metrics from Prometheus")
+                await asyncio.sleep(MONITOR_INTERVAL)
+                continue
+
+            log(f"[{ts}] Fetched {len(metrics)} metrics")
+
+            # 2. Save metrics to MongoDB
+            if db is not None:
+                try:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: db.metrics.insert_one({
+                            "timestamp": datetime.utcnow(),
+                            "count": len(metrics),
+                            "data": metrics[:50]
+                        })
+                    )
+                    log(f"[{ts}] Saved metrics to MongoDB")
+                except Exception as e:
+                    log(f"[{ts}] MongoDB save error: {e}")
+
+            # Optional: enforce MAX_DOCS (kept from your file, but it was never called)
+            if db is not None:
+                try:
+                    await asyncio.get_event_loop().run_in_executor(None, lambda: cleanup_collection(db, "metrics"))
+                    await asyncio.get_event_loop().run_in_executor(None, lambda: cleanup_collection(db, "anomalies"))
+                    await asyncio.get_event_loop().run_in_executor(None, lambda: cleanup_collection(db, "rca"))
+                except Exception as e:
+                    log(f"[{ts}] Cleanup error: {e}")
+
+            # 3. Detect anomalies
+            anomalies = detect_anomalies(metrics)
+
+            if not anomalies:
+                log(f"[{ts}] No anomalies")
+                await asyncio.sleep(MONITOR_INTERVAL)
+                continue
+
+            # Deduplicate
+            seen = set()
+            unique_anomalies = []
+            for a in anomalies:
+                if a["metric"] not in seen:
+                    seen.add(a["metric"])
+                    unique_anomalies.append(a)
+            anomalies = unique_anomalies[:3]
+
+            # 4. Process each anomaly
+            for anomaly in anomalies:
+                sev = anomaly["severity"].upper()
+                log(f"[{ts}] ANOMALY [{sev}]: {anomaly['metric']}={anomaly['value']} - {anomaly['reason']}")
+
+                # 5. Save anomaly to MongoDB
+                anomaly_id = None
+                if db is not None:
+                    try:
+                        result = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: db.anomalies.insert_one({
+                                "timestamp": datetime.utcnow(),
+                                "metric": anomaly["metric"],
+                                "value": anomaly["value"],
+                                "instance": anomaly.get("instance", "unknown"),
+                                "severity": anomaly["severity"],
+                                "reason": anomaly["reason"]
+                            })
+                        )
+                        anomaly_id = result.inserted_id
+                    except Exception as e:
+                        log(f"[{ts}] Anomaly save error: {e}")
+
+                # 6. Get LLM analysis
+                analysis = await get_llm_analysis(anomaly, metrics)
+                log(f"[{ts}] RCA: {analysis.get('cause')} | Fix: {analysis.get('fix')}")
+
+                # 7. Save RCA to MongoDB
+                if db is not None and anomaly_id is not None:
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: db.rca.insert_one({
+                                "timestamp": datetime.utcnow(),
+                                "anomaly_id": anomaly_id,
+                                "metric": anomaly["metric"],
+                                "instance": anomaly.get("instance", "unknown"),
+                                "summary": analysis.get("summary"),
+                                "cause": analysis.get("cause"),
+                                "fix": analysis.get("fix")
+                            })
+                        )
+                    except Exception as e:
+                        log(f"[{ts}] RCA save error: {e}")
+
+                # 8. Send email
+                body = f"""
+                <h2>{sev} Anomaly</h2>
+                <p><b>Metric:</b> {anomaly['metric']}</p>
+                <p><b>Instance:</b> {anomaly.get('instance', 'unknown')}</p>
+                <p><b>Value:</b> {anomaly['value']}</p>
+                <p><b>Reason:</b> {anomaly['reason']}</p>
+                <h3>RCA</h3>
+                <p><b>Summary:</b> {analysis.get('summary')}</p>
+                <p><b>Cause:</b> {analysis.get('cause')}</p>
+                <p><b>Fix:</b> {analysis.get('fix')}</p>
+                """
+                if send_alert(f"[{sev}] {anomaly['metric']}", body):
+                    log(f"[{ts}] Email sent")
+
+        except Exception as e:
+            log(f"[{ts}] Monitor error: {e}")
+
+        await asyncio.sleep(MONITOR_INTERVAL)
+
+# ============ FASTAPI ============
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log(f"Monitor started | Prometheus: {PROM_URL} | LLM: {LLM_MODEL}")
+    log(f"MongoDB URI: {MONGO_URI[:30] if MONGO_URI else 'NOT SET'}...")
+
+    # Initialize default email config
+    db = get_db()
+    if db is not None:
+        if not db.email_config.find_one({}):
+            db.email_config.insert_one({
+                "enabled": False,
+                "recipients": []
+            })
+            log("[Email] Initialized default config")
+
+    task = asyncio.create_task(monitor())
+    yield
+    task.cancel()
+
+app = FastAPI(title="AI DevOps Monitor", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
-
-# ---------------- MONGO ----------------
-MONGO_URI = os.getenv("MONGO_URI")
-DB_NAME = os.getenv("MONGO_DB", "observability")
-
-
-def get_db():
-    logger.debug(f"Connecting to MongoDB: {DB_NAME}")
-    if not MONGO_URI:
-        raise RuntimeError("MONGO_URI is not set in environment/.env")
-
-    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    return client[DB_NAME]
-
-
-# ---------------- PROMETHEUS METRICS ----------------
-logger.info("✅ Enabling Prometheus instrumentation for FastAPI")
 Instrumentator().instrument(app).expose(app)
-logger.info("✅ Prometheus metrics endpoint exposed at /metrics")
 
-# ---------------- MODELS ----------------
-class Target(BaseModel):
-    name: str
-    endpoint: str
-    job: str
-    enabled: bool = True
+# ============ API ENDPOINTS ============
 
-
-class EmailConfig(BaseModel):
-    enabled: bool
-    recipients: List[EmailStr]
-
-
-# ---------------- ROUTES ----------------
 @app.get("/")
 def root():
-    logger.info("Health check requested")
-    return {
-        "status": "healthy",
-        "service": "AI DevOps Monitoring API - Automated Pipeline",
-        "version": "3.0.0",
-        "note": "Anomaly detection, RCA, and email alerts are automated via pipeline.py",
-        "endpoints": [
-            "/metrics",
-            "/metrics/prometheus",
-            "/anomalies",
-            "/rca",
-            "/stats",
-            "/agent/targets",
-            "/agent/email-config",
-        ],
-    }
-
-
-@app.get("/metrics/prometheus")
-async def get_metrics_from_prometheus(
-    query: Optional[str] = Query(
-        None,
-        description='PromQL query (e.g. up, http_requests_total, or {__name__=~".+"} for all)',
-    )
-):
-    logger.info("📊 Prometheus Metrics Fetch Request Started")
-    logger.debug(f"Query: {query}")
-
-    prometheus_url = os.getenv("PROMETHEUS_URL", "http://localhost:9090")
-    api_url = f"{prometheus_url}/api/v1/query"
-
-    if not query:
-        query = '{__name__=~".+"}'
-        logger.info("No query provided, fetching ALL metrics")
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(api_url, params={"query": query})
-            logger.info(f"📡 Prometheus response: {response.status_code}")
-            response.raise_for_status()
-
-            data = response.json()
-            if data.get("status") != "success":
-                raise HTTPException(status_code=500, detail="Prometheus query failed")
-
-            result = data.get("data", {}).get("result", [])
-            logger.info(f"✅ Query successful: {len(result)} series returned")
-
-            formatted = []
-            for m in result:
-                metric_name = m.get("metric", {}).get("__name__", "unknown")
-                labels = m.get("metric", {})
-                value_data = m.get("value", [None, None])
-                formatted.append(
-                    {
-                        "metric_name": metric_name,
-                        "labels": labels,
-                        "value": value_data[1],
-                        "timestamp": value_data[0],
-                    }
-                )
-
-            return {
-                "status": "success",
-                "prometheus_server": prometheus_url,
-                "query": query,
-                "metrics_count": len(formatted),
-                "metrics": formatted,
-            }
-
-    except httpx.ConnectError:
-        logger.error("❌ Cannot connect to Prometheus (check localhost:9090)")
-        raise HTTPException(status_code=503, detail="Cannot connect to Prometheus at localhost:9090")
-
-    except httpx.TimeoutException:
-        logger.error("⏱️ Prometheus request timed out")
-        raise HTTPException(status_code=408, detail="Timeout connecting to Prometheus")
-
-    except Exception as e:
-        logger.error(f"❌ Error querying Prometheus: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------- AGENT TARGETS ----------------
-@app.get("/agent/targets")
-def get_targets():
-    logger.info("📋 Fetching monitoring targets")
-    try:
-        db = get_db()
-        config = db.agent_config.find_one({"type": "targets"})
-
-        if not config:
-            logger.info("No targets found, creating default targets")
-            default_targets = [
-                {"id": str(uuid.uuid4()), "name": "Prometheus", "endpoint": "localhost:9090", "job": "prometheus", "enabled": True},
-                {"id": str(uuid.uuid4()), "name": "FastAPI Backend", "endpoint": "localhost:8000", "job": "fastapi-backend", "enabled": True},
-                {"id": str(uuid.uuid4()), "name": "FastAPI Service 2", "endpoint": "localhost:8081", "job": "fastapi-service-2", "enabled": True},
-                {"id": str(uuid.uuid4()), "name": "Windows Exporter", "endpoint": "localhost:9182", "job": "windows-exporter", "enabled": True},
-            ]
-            db.agent_config.insert_one({"type": "targets", "targets": default_targets})
-            return {"targets": default_targets}
-
-        return {"targets": config.get("targets", [])}
-    except Exception as e:
-        logger.error(f"Error fetching targets: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/agent/targets")
-def add_target(target: Target):
-    logger.info(f"➕ Adding new target: {target.name}")
-    try:
-        db = get_db()
-
-        new_target = {
-            "id": str(uuid.uuid4()),
-            "name": target.name,
-            "endpoint": target.endpoint,
-            "job": target.job,
-            "enabled": target.enabled,
-            "created_at": datetime.utcnow().isoformat(),
-        }
-
-        db.agent_config.update_one(
-            {"type": "targets"},
-            {"$push": {"targets": new_target}},
-            upsert=True,
-        )
-
-        return {"status": "success", "message": "Target added", "target": new_target}
-    except Exception as e:
-        logger.error(f"Error adding target: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/agent/targets/{target_id}")
-def delete_target(target_id: str):
-    logger.info(f"🗑️ Deleting target: {target_id}")
-    try:
-        db = get_db()
-        config = db.agent_config.find_one({"type": "targets"})
-        if not config:
-            raise HTTPException(status_code=404, detail="No targets configured")
-
-        targets = config.get("targets", [])
-        new_targets = [t for t in targets if t.get("id") != target_id]
-        if len(new_targets) == len(targets):
-            raise HTTPException(status_code=404, detail="Target not found")
-
-        db.agent_config.update_one({"type": "targets"}, {"$set": {"targets": new_targets}})
-        return {"status": "success", "message": "Target deleted"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting target: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.put("/agent/targets/{target_id}")
-def update_target(target_id: str, enabled: bool):
-    logger.info(f"🔄 Updating target {target_id}: enabled={enabled}")
-    try:
-        db = get_db()
-        config = db.agent_config.find_one({"type": "targets"})
-        if not config:
-            raise HTTPException(status_code=404, detail="No targets configured")
-
-        targets = config.get("targets", [])
-        found = False
-        for t in targets:
-            if t.get("id") == target_id:
-                t["enabled"] = enabled
-                found = True
-                break
-
-        if not found:
-            raise HTTPException(status_code=404, detail="Target not found")
-
-        db.agent_config.update_one({"type": "targets"}, {"$set": {"targets": targets}})
-        return {"status": "success", "message": f"Target {'enabled' if enabled else 'disabled'}"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error updating target: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------- EMAIL CONFIG ----------------
-@app.get("/agent/email-config")
-def get_email_config():
-    logger.info("📧 Fetching email configuration")
-    try:
-        db = get_db()
-        config = db.agent_config.find_one({"type": "email"})
-
-        if not config:
-            return {
-                "enabled": os.getenv("SEND_EMAIL_ALERTS", "true").lower() == "true",
-                "recipients": [os.getenv("ALERT_EMAIL", "")],
-            }
-
-        return {"enabled": config.get("enabled", False), "recipients": config.get("recipients", [])}
-    except Exception as e:
-        logger.error(f"Error fetching email config: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.put("/agent/email-config")
-def update_email_config(config: EmailConfig):
-    logger.info(f"🔄 Updating email config: enabled={config.enabled}, recipients={len(config.recipients)}")
-    try:
-        db = get_db()
-        db.agent_config.update_one(
-            {"type": "email"},
-            {"$set": {"enabled": config.enabled, "recipients": [str(r) for r in config.recipients]}},
-            upsert=True,
-        )
-        return {"status": "success", "config": config.dict()}
-    except Exception as e:
-        logger.error(f"Error updating email config: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------- VIEWING ----------------
-@app.get("/anomalies")
-def get_anomalies(limit: int = Query(10, ge=1, le=100)):
-    logger.info(f"📊 Fetching anomalies (limit={limit})")
-    try:
-        db = get_db()
-        docs = list(db.anomalies.find().sort("timestamp", -1).limit(limit))
-
-        for d in docs:
-            d["_id"] = str(d["_id"])
-            if isinstance(d.get("timestamp"), datetime):
-                d["timestamp"] = d["timestamp"].isoformat()
-
-        return {"count": len(docs), "anomalies": docs}
-    except Exception as e:
-        logger.error(f"Error fetching anomalies: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/rca")
-def get_rca(limit: int = Query(10, ge=1, le=100)):
-    logger.info(f"📊 Fetching RCA results (limit={limit})")
-    try:
-        db = get_db()
-        docs = list(db.rca.find().sort("timestamp", -1).limit(limit))
-
-        for d in docs:
-            d["_id"] = str(d["_id"])
-            if "anomaly_id" in d:
-                d["anomaly_id"] = str(d["anomaly_id"])
-            if isinstance(d.get("timestamp"), datetime):
-                d["timestamp"] = d["timestamp"].isoformat()
-
-        return {"count": len(docs), "rca_results": docs}
-    except Exception as e:
-        logger.error(f"Error fetching RCA results: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
+    return {"status": "running", "prometheus": PROM_URL, "llm": LLM_MODEL}
 
 @app.get("/stats")
 def get_stats():
-    logger.info("📊 Fetching System Statistics")
-    try:
-        db = get_db()
-        total_anomalies = db.anomalies.count_documents({})
-        total_rca = db.rca.count_documents({})
+    """Get statistics for dashboard"""
+    db = get_db()
+    if db is None:
+        return {"collections": {}}
 
-        severity_counts = {}
-        for sev in ["critical", "high", "medium", "low"]:
-            c = db.anomalies.count_documents({"severity": sev})
-            if c:
-                severity_counts[sev] = c
-
-        recent = db.anomalies.find_one(sort=[("timestamp", -1)])
-        last_anomaly_time = None
-        if recent and isinstance(recent.get("timestamp"), datetime):
-            last_anomaly_time = recent["timestamp"].isoformat()
-
-        return {
-            "total_anomalies": total_anomalies,
-            "total_rca": total_rca,
-            "severity_breakdown": severity_counts,
-            "last_anomaly": last_anomaly_time,
-            "pipeline_status": "automated",
+    return {
+        "collections": {
+            "metrics": {"total": db.metrics.count_documents({})},
+            "anomalies": {
+                "total": db.anomalies.count_documents({}),
+                "open": db.anomalies.count_documents({"severity": {"$in": ["critical", "high"]}}),
+                "analyzed": db.rca.count_documents({})
+            },
+            "rca_results": {"total": db.rca.count_documents({})}
         }
-    except Exception as e:
-        logger.error(f"Error fetching statistics: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    }
 
+@app.get("/prom-metrics")
+def get_prom_metrics():
+    """Get recent metrics"""
+    db = get_db()
+    if db is None:
+        return {"metrics": []}
+    docs = list(db.metrics.find().sort("timestamp", -1).limit(10))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+        d["timestamp"] = d["timestamp"].isoformat()
+    return {"metrics": docs}
 
-# ---------------- LIFECYCLE ----------------
-@app.on_event("startup")
-async def startup_event():
-    logger.info("=" * 80)
-    logger.info("🚀 FASTAPI SERVER STARTING")
-    logger.info(f"   MongoDB DB: {DB_NAME}")
-    logger.info("   Metrics endpoint: http://localhost:8000/metrics")
-    logger.info("   Prometheus query: http://localhost:8000/metrics/prometheus")
-    logger.info("=" * 80)
+@app.get("/anomalies")
+def get_anomalies():
+    db = get_db()
+    if db is None:
+        return {"anomalies": []}
+    docs = list(db.anomalies.find().sort("timestamp", -1).limit(20))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+        d["timestamp"] = d["timestamp"].isoformat()
+    return {"anomalies": docs}
 
+@app.get("/rca")
+def get_rca():
+    db = get_db()
+    if db is None:
+        return {"rca": []}
+    docs = list(db.rca.find().sort("timestamp", -1).limit(20))
+    for d in docs:
+        d["_id"] = str(d["_id"])
+        d["anomaly_id"] = str(d.get("anomaly_id", ""))
+        d["timestamp"] = d["timestamp"].isoformat()
+    return {"rca": docs}
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("=" * 80)
-    logger.info("🛑 FASTAPI SERVER SHUTTING DOWN")
-    logger.info("=" * 80)
+# ============ EMAIL CONFIG ENDPOINTS ============
 
+@app.get("/agent/email-config")
+def get_email_config():
+    """Get email configuration"""
+    db = get_db()
+    if db is None:
+        return {"enabled": False, "recipients": []}
 
-# ---------------- RUN UVICORN (so you get access logs) ----------------
+    config = db.email_config.find_one({})
+    if not config:
+        return {"enabled": False, "recipients": []}
+
+    return {
+        "enabled": config.get("enabled", False),
+        "recipients": config.get("recipients", [])
+    }
+
+@app.put("/agent/email-config")
+def update_email_config(config: EmailConfig):
+    """Update email configuration"""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    db.email_config.update_one(
+        {},
+        {"$set": {
+            "enabled": config.enabled,
+            "recipients": config.recipients
+        }},
+        upsert=True
+    )
+
+    return {"message": "Email config updated"}
+
+@app.post("/agent/test-email")
+def send_test_email():
+    """Send a test email"""
+    success = send_alert(
+        "[TEST] AI DevOps Monitor",
+        """
+        <h2>Test Email</h2>
+        <p>This is a test email from your AI DevOps Monitoring system.</p>
+        <p>If you received this, your email configuration is working correctly!</p>
+        """
+    )
+
+    if success:
+        return {"message": "Test email sent successfully!"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to send test email. Check your configuration.")
+
 if __name__ == "__main__":
     import uvicorn
-
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn_log_level = os.getenv("UVICORN_LOG_LEVEL", "info").lower()
-    reload_dev = os.getenv("RELOAD", "true").lower() == "true"
-
-    # log_config ensures access logs print correctly + your file logger works
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=reload_dev,
-        log_level=uvicorn_log_level,
-        access_log=True,
-        log_config=build_log_config(APP_LOG_LEVEL),
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -5,25 +5,25 @@ export default function Anomalies() {
   const [anomalies, setAnomalies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [filter, setFilter] = useState({ severity: '', status: '', limit: 20 });
+  const [filter, setFilter] = useState({ severity: '' });
 
   useEffect(() => {
     fetchAnomalies();
-  }, [filter]);
+    const interval = setInterval(fetchAnomalies, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   const fetchAnomalies = async () => {
     try {
-      setLoading(true);
-      const params = {};
-      if (filter.severity) params.severity = filter.severity;
-      if (filter.status) params.status = filter.status;
-      if (filter.limit) params.limit = filter.limit;
-
-      const data = await api.getAnomalies(params);
+      if (anomalies.length === 0) {
+        setLoading(true);
+      }
+      const data = await api.getAnomalies();
       setAnomalies(data.anomalies || []);
       setError(null);
     } catch (err) {
       setError(err.message);
+      console.error('Error fetching anomalies:', err);
     } finally {
       setLoading(false);
     }
@@ -39,98 +39,81 @@ export default function Anomalies() {
     return colors[severity] || colors.low;
   };
 
-  const getStatusColor = (status) => {
-    return status === 'open'
-      ? 'bg-orange-100 text-orange-700'
-      : 'bg-green-100 text-green-700';
-  };
-
-  const getInstanceInfo = (instance) => {
-    const instanceMap = {
-      'localhost:9090': { name: 'Prometheus', icon: '📊', color: 'bg-blue-100 text-blue-700 border-blue-300' },
-      'localhost:8083': { name: 'FastAPI Backend', icon: '🚀', color: 'bg-green-100 text-green-700 border-green-300' },
-      'localhost:8081': { name: 'FastAPI Service 2', icon: '⚡', color: 'bg-purple-100 text-purple-700 border-purple-300' },
-      'localhost:9182': { name: 'Windows Exporter', icon: '💻', color: 'bg-orange-100 text-orange-700 border-orange-300' },
-    };
-    return instanceMap[instance] || { name: instance, icon: '🔧', color: 'bg-gray-100 text-gray-700 border-gray-300' };
-  };
+  const filteredAnomalies = filter.severity
+    ? anomalies.filter(a => a.severity === filter.severity)
+    : anomalies;
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <p className="text-gray-600">Detected anomalies with AI analysis</p>
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800">Anomalies</h2>
+          <p className="text-gray-600">Detected anomalies with AI analysis</p>
+        </div>
         <button
           onClick={fetchAnomalies}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center space-x-2"
+          disabled={loading}
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center space-x-2 disabled:opacity-50"
         >
-          <span>🔄</span>
+          <span>{loading ? '...' : '↻'}</span>
           <span>Refresh</span>
         </button>
       </div>
 
       {/* Filters */}
-      <div className="bg-white rounded-xl p-4 shadow-sm">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-200">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Severity</label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Severity Filter</label>
             <select
               value={filter.severity}
               onChange={(e) => setFilter({ ...filter, severity: e.target.value })}
               className="w-full bg-white border border-gray-300 text-gray-800 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <option value="">All</option>
-              <option value="critical">Critical</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
+              <option value="">All ({anomalies.length})</option>
+              <option value="critical">Critical ({anomalies.filter(a => a.severity === 'critical').length})</option>
+              <option value="high">High ({anomalies.filter(a => a.severity === 'high').length})</option>
+              <option value="medium">Medium ({anomalies.filter(a => a.severity === 'medium').length})</option>
+              <option value="low">Low ({anomalies.filter(a => a.severity === 'low').length})</option>
             </select>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
-            <select
-              value={filter.status}
-              onChange={(e) => setFilter({ ...filter, status: e.target.value })}
-              className="w-full bg-white border border-gray-300 text-gray-800 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">All</option>
-              <option value="open">Open</option>
-              <option value="analyzed">Analyzed</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Limit</label>
-            <select
-              value={filter.limit}
-              onChange={(e) => setFilter({ ...filter, limit: e.target.value })}
-              className="w-full bg-white border border-gray-300 text-gray-800 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="10">10</option>
-              <option value="20">20</option>
-              <option value="50">50</option>
-              <option value="100">100</option>
-            </select>
+          <div className="flex items-end">
+            <div className="bg-blue-50 px-4 py-3 rounded-lg w-full border border-blue-200">
+              <p className="text-sm text-gray-600">Showing</p>
+              <p className="text-2xl font-bold text-blue-600">{filteredAnomalies.length}</p>
+            </div>
           </div>
         </div>
       </div>
 
       {/* Anomalies List */}
-      {loading ? (
+      {loading && anomalies.length === 0 ? (
         <div className="flex items-center justify-center h-64">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
         </div>
       ) : error ? (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-          <p className="text-red-600">Error: {error}</p>
+          <p className="text-red-600 mb-2">Error: {error}</p>
+          <button 
+            onClick={fetchAnomalies}
+            className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+          >
+            Retry
+          </button>
         </div>
-      ) : anomalies.length === 0 ? (
-        <div className="bg-white rounded-xl p-12 shadow-sm text-center">
+      ) : filteredAnomalies.length === 0 ? (
+        <div className="bg-white rounded-xl p-12 shadow-sm text-center border border-gray-200">
+          <div className="text-6xl mb-4">✓</div>
           <p className="text-gray-500 text-lg">No anomalies found</p>
+          <p className="text-gray-400 text-sm mt-2">
+            {filter.severity ? 'Try changing the severity filter' : 'All systems operating normally'}
+          </p>
         </div>
       ) : (
         <div className="space-y-4">
-          {anomalies.map((anomaly) => (
+          {filteredAnomalies.map((anomaly, idx) => (
             <div
-              key={anomaly.anomaly_id}
+              key={anomaly._id || idx}
               className="bg-white rounded-xl p-6 shadow-sm border border-gray-200 hover:shadow-md transition-shadow"
             >
               <div className="flex items-start justify-between mb-4">
@@ -140,51 +123,38 @@ export default function Anomalies() {
                     <span className={`px-3 py-1 rounded-full text-xs font-medium border ${getSeverityColor(anomaly.severity)}`}>
                       {anomaly.severity?.toUpperCase()}
                     </span>
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(anomaly.status)}`}>
-                      {anomaly.status}
-                    </span>
                   </div>
-                  <div className="flex items-center space-x-2">
-                    <span className={`inline-flex items-center space-x-2 px-3 py-1 rounded-lg text-xs font-medium border ${getInstanceInfo(anomaly.instance).color}`}>
-                      <span>{getInstanceInfo(anomaly.instance).icon}</span>
-                      <span>{getInstanceInfo(anomaly.instance).name}</span>
-                      <span className="text-gray-500">({anomaly.instance})</span>
-                    </span>
-                  </div>
+                  {anomaly.instance && (
+                    <p className="text-sm text-gray-500 mb-2">Instance: {anomaly.instance}</p>
+                  )}
+                  <p className="text-sm text-gray-600">{anomaly.reason}</p>
                 </div>
                 <div className="text-right">
                   <p className="text-sm text-gray-500">
-                    {new Date(anomaly.detected_at).toLocaleString()}
+                    {new Date(anomaly.timestamp).toLocaleString()}
                   </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-                  <p className="text-xs text-gray-600 mb-1">Expected</p>
-                  <p className="text-lg font-semibold text-gray-800">{anomaly.expected}</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                  <p className="text-xs text-gray-600 mb-1">Metric Value</p>
+                  <p className="text-2xl font-bold text-gray-800">
+                    {typeof anomaly.value === 'number' ? anomaly.value.toFixed(2) : anomaly.value}
+                  </p>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-                  <p className="text-xs text-gray-600 mb-1">Actual</p>
-                  <p className="text-lg font-semibold text-gray-800">{anomaly.actual}</p>
-                </div>
-                <div className="bg-red-50 rounded-lg p-3 border border-red-200">
-                  <p className="text-xs text-gray-600 mb-1">Deviation</p>
-                  <p className="text-lg font-semibold text-red-600">{anomaly.deviation_pct}%</p>
-                </div>
-                <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
-                  <p className="text-xs text-gray-600 mb-1">Z-Score</p>
-                  <p className="text-lg font-semibold text-gray-800">{anomaly.z_score}</p>
+                <div className="bg-red-50 rounded-lg p-4 border border-red-200">
+                  <p className="text-xs text-gray-600 mb-1">Issue</p>
+                  <p className="text-sm font-semibold text-red-600">{anomaly.reason}</p>
                 </div>
               </div>
 
-              {anomaly.llm_analysis && (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                  <p className="text-sm text-gray-700">
-                    <span className="font-semibold text-blue-700">AI Analysis:</span> {anomaly.llm_analysis}
-                  </p>
+              <div className="mt-4 pt-4 border-t border-gray-200">
+                <div className="flex items-center justify-between text-xs text-gray-500">
+                  <span>ID: {anomaly._id}</span>
+                  <span>Detected: {new Date(anomaly.timestamp).toLocaleString()}</span>
                 </div>
-              )}
+              </div>
             </div>
           ))}
         </div>
