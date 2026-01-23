@@ -11,7 +11,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("MONGO_DB", "observability")
 
 # LLM (Ollama)
-LLM_URL = os.getenv("LLM_URL", "http://localhost:11434")
+LLM_URL = os.getenv("LLM_URL")
 LLM_MODEL = os.getenv("LLM_MODEL", "llama3.2")
 
 # Monitoring
