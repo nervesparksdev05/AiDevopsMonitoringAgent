@@ -1,5 +1,5 @@
 """
-AI DevOps Monitor - Updated with Agent Config, Email Settings & Langfuse v3 Integration
+AI DevOps Monitor - Updated with Session Management for Langfuse v3.12+ + Slack Integration (ENV ONLY)
 Run: uvicorn main:app --port 8000 --reload
 
 MongoDB Collections:
@@ -8,21 +8,27 @@ MongoDB Collections:
 - rca: Root cause analysis
 - targets: Prometheus targets configuration
 - email_config: Email alert settings
+- chat_sessions: Chat conversation sessions
 
-Langfuse v3 SDK uses:
+Slack (ENV ONLY):
+- SLACK_ENABLED=true/false
+- SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+
+Langfuse v3.12+ SDK uses:
 - get_client() for singleton client
 - start_as_current_observation() context manager
-- @observe decorator
+- propagate_attributes() for session_id, user_id
+- @observe decorator for function-level tracing
 """
 import sys
 import json
 import asyncio
 import smtplib
-import ssl
 import os
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from collections import deque
@@ -35,13 +41,13 @@ class MultiFileHandler(logging.Handler):
         super().__init__()
         self.error_handler = logging.FileHandler("error.log")
         self.error_handler.setLevel(logging.ERROR)
-        
+
         self.debug_handler = logging.FileHandler("debug.log")
         self.debug_handler.setLevel(logging.DEBUG)
-        
+
         self.info_handler = logging.FileHandler("app.log")
         self.info_handler.setLevel(logging.INFO)
-        
+
         formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
         self.error_handler.setFormatter(formatter)
         self.debug_handler.setFormatter(formatter)
@@ -58,8 +64,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         MultiFileHandler(),
-        logging.StreamHandler(sys.stdout)
-    ]
+        logging.StreamHandler(sys.stdout),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -76,45 +82,61 @@ from pymongo import MongoClient
 from pydantic import BaseModel
 
 
-# Import Langfuse v3
+# ============ LANGFUSE v3.12+ CONFIGURATION ============
 LANGFUSE_AVAILABLE = False
 langfuse = None
+propagate_attributes = None
+observe = None
 
 try:
-    from langfuse import Langfuse, get_client
+    from langfuse import Langfuse, get_client, propagate_attributes as _propagate_attributes, observe as _observe
     LANGFUSE_AVAILABLE = True
+    propagate_attributes = _propagate_attributes
+    observe = _observe
     logger.info("[Langfuse] v3 SDK imported successfully")
 except ImportError:
-    # Trigger reload 2
     logger.warning("[Langfuse] Package not installed. Run: pip install langfuse --break-system-packages")
+
+    def propagate_attributes(**kwargs):
+        from contextlib import contextmanager
+        @contextmanager
+        def dummy_context():
+            yield
+        return dummy_context()
+
+    def observe(*args, **kwargs):
+        def decorator(func):
+            return func
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return decorator
+
 
 from config import (
     PROM_URL, MONGO_URI, DB_NAME,
     LLM_URL, LLM_MODEL,
     MONITOR_INTERVAL, Z_THRESHOLD, MAX_DOCS,
-    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_EMAILS
+    SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_EMAILS,
+    SLACK_ENABLED, SLACK_WEBHOOK_URL,
 )
 
-# ============ LANGFUSE v3 CONFIGURATION ============
+
+# ============ LANGFUSE v3.12+ INITIALIZATION ============
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "").strip()
 LANGFUSE_HOST = os.getenv("LANGFUSE_HOST", "https://cloud.langfuse.com").strip()
 LANGFUSE_ENABLED = LANGFUSE_AVAILABLE and bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
 
-# Initialize Langfuse v3
 if LANGFUSE_ENABLED:
     try:
-        # v3: Initialize with constructor, then use get_client()
         Langfuse(
             public_key=LANGFUSE_PUBLIC_KEY,
             secret_key=LANGFUSE_SECRET_KEY,
-            host=LANGFUSE_HOST
+            host=LANGFUSE_HOST,
         )
         langfuse = get_client()
-        
-        # Verify connection
         langfuse.auth_check()
-        logger.info("[Langfuse] ✅ v3 Connected successfully!")
+        logger.info("[Langfuse] ✅ v3.12+ Connected successfully!")
     except Exception as e:
         logger.error(f"[Langfuse] ❌ Failed to initialize: {e}")
         langfuse = None
@@ -124,6 +146,7 @@ else:
         logger.info("[Langfuse] ⚠️ Not installed")
     else:
         logger.info("[Langfuse] ⚠️ Disabled (API keys not set in .env)")
+
 
 # ============ MODELS ============
 class Target(BaseModel):
@@ -138,9 +161,89 @@ class EmailConfig(BaseModel):
 class ChatMessage(BaseModel):
     message: str
     context: Dict = {}
+    session_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     response: str
+    session_id: str
+
+
+# ============ SESSION MANAGEMENT ============
+class SessionManager:
+    """Manage chat sessions and their metadata"""
+
+    def __init__(self):
+        self.active_sessions = {}  # In-memory cache
+
+    def create_session(self, db) -> str:
+        session_id = str(uuid.uuid4())
+        session_data = {
+            "session_id": session_id,
+            "created_at": datetime.utcnow(),
+            "last_activity": datetime.utcnow(),
+            "message_count": 0,
+            "total_tokens": 0,
+        }
+        if db is not None:
+            try:
+                db.chat_sessions.insert_one(session_data)
+                logger.info(f"[Session] Created new session: {session_id}")
+            except Exception as e:
+                logger.error(f"[Session] Failed to create session in DB: {e}")
+        self.active_sessions[session_id] = session_data
+        return session_id
+
+    def get_session(self, session_id: str, db) -> Optional[Dict]:
+        if session_id in self.active_sessions:
+            return self.active_sessions[session_id]
+        if db is not None:
+            try:
+                session = db.chat_sessions.find_one({"session_id": session_id})
+                if session:
+                    self.active_sessions[session_id] = session
+                    return session
+            except Exception as e:
+                logger.error(f"[Session] Failed to fetch session: {e}")
+        return None
+
+    def update_session(self, session_id: str, db, tokens: int = 0):
+        now = datetime.utcnow()
+        if db is not None:
+            try:
+                db.chat_sessions.update_one(
+                    {"session_id": session_id},
+                    {
+                        "$set": {"last_activity": now},
+                        "$inc": {"message_count": 1, "total_tokens": tokens},
+                    },
+                )
+            except Exception as e:
+                logger.error(f"[Session] Failed to update session: {e}")
+
+        if session_id in self.active_sessions:
+            self.active_sessions[session_id]["last_activity"] = now
+            self.active_sessions[session_id]["message_count"] = self.active_sessions[session_id].get("message_count", 0) + 1
+            self.active_sessions[session_id]["total_tokens"] = self.active_sessions[session_id].get("total_tokens", 0) + tokens
+
+    def cleanup_old_sessions(self, db, hours: int = 24):
+        if db is None:
+            return
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        try:
+            result = db.chat_sessions.delete_many({"last_activity": {"$lt": cutoff}})
+            if result.deleted_count > 0:
+                logger.info(f"[Session] Cleaned up {result.deleted_count} old sessions")
+
+            to_remove = [
+                sid for sid, data in self.active_sessions.items()
+                if data.get("last_activity", datetime.utcnow()) < cutoff
+            ]
+            for sid in to_remove:
+                del self.active_sessions[sid]
+        except Exception as e:
+            logger.error(f"[Session] Cleanup failed: {e}")
+
+session_manager = SessionManager()
 
 
 # ============ THRESHOLDS ============
@@ -154,6 +257,7 @@ THRESHOLDS = {
 }
 
 metric_history: Dict[str, deque] = {}
+
 
 # ============ DATABASE ============
 _mongo_client = None
@@ -174,7 +278,7 @@ def get_db():
                 serverSelectionTimeoutMS=2000,
                 connectTimeoutMS=2000,
                 socketTimeoutMS=2000,
-                maxPoolSize=1
+                maxPoolSize=1,
             )
             _db_connected = False
 
@@ -198,130 +302,158 @@ def cleanup_collection(db, collection: str):
             db[collection].delete_many({"_id": {"$in": [d["_id"] for d in old]}})
             logger.info(f"[cleanup] Removed {len(old)} old docs from {collection}")
 
-# ============ LLM WITH LANGFUSE v3 ============
-def ask_llm(prompt: str, trace_name: str = "LLM Call", metadata: dict = None) -> Optional[str]:
+
+# ============ SLACK (ENV ONLY) ============
+def _mask_webhook(url: str) -> str:
+    if not url:
+        return ""
+    return url[:30] + "..." + url[-8:] if len(url) > 45 else "***"
+
+def slack_is_configured() -> bool:
+    return bool(SLACK_ENABLED and (SLACK_WEBHOOK_URL or "").strip())
+
+def send_slack_alert_text(text: str) -> bool:
     """
-    Call LLM with Langfuse v3 tracking
-    Uses: start_as_current_observation() context manager
+    Minimal Slack sender using ONLY:
+      - SLACK_ENABLED
+      - SLACK_WEBHOOK_URL
     """
-    
+    if not SLACK_ENABLED:
+        return False
+    webhook = (SLACK_WEBHOOK_URL or "").strip()
+    if not webhook:
+        logger.warning("[Slack] SLACK_ENABLED=true but SLACK_WEBHOOK_URL is empty")
+        return False
+
+    payload = {
+        "text": text,
+        "username": "AI DevOps Monitor",
+        "icon_emoji": ":rotating_light:",
+    }
+
+    try:
+        logger.info(f"[Slack] Sending (webhook={_mask_webhook(webhook)})")
+        resp = requests.post(webhook, json=payload, timeout=10)
+        if not resp.ok:
+            logger.error(f"[Slack] Failed: HTTP {resp.status_code} | {resp.text[:200]}")
+            return False
+        logger.info("[Slack] ✅ Alert sent")
+        return True
+    except Exception as e:
+        logger.error(f"[Slack] Error: {e}")
+        return False
+
+
+# ============ LLM WITH LANGFUSE v3.12+ & SESSION SUPPORT ============
+def ask_llm(
+    prompt: str,
+    trace_name: str = "LLM Call",
+    metadata: dict = None,
+    session_id: Optional[str] = None,
+) -> Optional[tuple[str, int]]:
     response_text = None
-    
-    # If Langfuse is enabled, use context manager
-    if langfuse:
+    total_tokens = 0
+
+    if langfuse and LANGFUSE_ENABLED:
         try:
-            # Create a span for the entire operation
             with langfuse.start_as_current_observation(
                 as_type="span",
                 name=trace_name,
-                metadata={
-                    **(metadata or {}),
-                    "model": LLM_MODEL,
-                    "endpoint": LLM_URL
-                }
-            ) as span:
-                # Create nested generation for the LLM call
-                with langfuse.start_as_current_observation(
-                    as_type="generation",
-                    name="llm_call",
-                    model=LLM_MODEL,
-                    input=prompt
-                ) as generation:
-                    try:
-                        logger.info(f"[LLM] Calling {LLM_URL}...")
-                        start_time = datetime.utcnow()
-                        
-                        resp = requests.post(
-                            f"{LLM_URL}/api/generate",
-                            json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
-                            timeout=30
-                        )
-                        
-                        end_time = datetime.utcnow()
-                        latency_ms = (end_time - start_time).total_seconds() * 1000
-                        
-                        logger.info(f"[LLM] Response received ({latency_ms:.0f}ms)")
-                        
-                        if not resp.ok:
-                            logger.error(f"[LLM] Error: HTTP {resp.status_code}")
-                            generation.update(
-                                output=f"Error: HTTP {resp.status_code}",
-                                metadata={"error": True, "status_code": resp.status_code, "latency_ms": latency_ms}
+                metadata={**(metadata or {}), "model": LLM_MODEL, "endpoint": LLM_URL},
+            ) as root_span:
+                with propagate_attributes(session_id=session_id) if session_id else nullcontext():
+                    with langfuse.start_as_current_observation(
+                        as_type="generation",
+                        name="llm-generation",
+                        model=LLM_MODEL,
+                        input=prompt,
+                    ) as generation:
+                        try:
+                            log_msg = f"[LLM] Calling {LLM_URL}..."
+                            if session_id:
+                                log_msg += f" (session: {session_id})"
+                            logger.info(log_msg)
+
+                            start_time = datetime.utcnow()
+                            resp = requests.post(
+                                f"{LLM_URL}/api/generate",
+                                json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
+                                timeout=30,
                             )
-                            return None
-                        
-                        response_text = resp.json().get("response", "")
-                        
-                        # Estimate tokens
-                        input_tokens = int(len(prompt.split()) * 1.3)
-                        output_tokens = int(len(response_text.split()) * 1.3)
-                        
-                        # Update generation with output
-                        generation.update(
-                            output=response_text,
-                            usage_details={
-                                "input_tokens": input_tokens,
-                                "output_tokens": output_tokens,
-                                "total_tokens": input_tokens + output_tokens
-                            },
-                            metadata={"latency_ms": latency_ms, "error": False}
-                        )
-                        
-                        logger.info(f"[Langfuse] ✅ Logged generation ({input_tokens + output_tokens} tokens)")
-                        
-                    except requests.exceptions.Timeout:
-                        logger.error("[LLM] Timeout after 30s")
-                        generation.update(output="Error: Timeout", metadata={"error": True, "timeout": True})
-                        return None
-                    
-                    except Exception as e:
-                        logger.error(f"[LLM] Error: {e}")
-                        generation.update(output=f"Error: {str(e)}", metadata={"error": True})
-                        return None
-                
-                # Update span with final output
-                span.update(output={"response": response_text[:100] if response_text else "No response"})
-            
-            return response_text
-            
+                            end_time = datetime.utcnow()
+                            latency_ms = (end_time - start_time).total_seconds() * 1000
+
+                            logger.info(f"[LLM] Response received ({latency_ms:.0f}ms)")
+
+                            if not resp.ok:
+                                logger.error(f"[LLM] Error: HTTP {resp.status_code}")
+                                generation.update(
+                                    output=f"Error: HTTP {resp.status_code}",
+                                    metadata={"error": True, "status_code": resp.status_code, "latency_ms": latency_ms},
+                                )
+                                return None, 0
+
+                            response_text = resp.json().get("response", "")
+
+                            input_tokens = int(len(prompt.split()) * 1.3)
+                            output_tokens = int(len(response_text.split()) * 1.3)
+                            total_tokens = input_tokens + output_tokens
+
+                            generation.update(
+                                output=response_text,
+                                usage={"input": input_tokens, "output": output_tokens, "total": total_tokens},
+                                metadata={"latency_ms": latency_ms, "error": False},
+                            )
+
+                            logger.info(f"[Langfuse] ✅ Logged generation ({total_tokens} tokens)")
+                        except requests.exceptions.Timeout:
+                            logger.error("[LLM] Timeout after 30s")
+                            generation.update(output="Error: Timeout", metadata={"error": True, "timeout": True})
+                            return None, 0
+                        except Exception as e:
+                            logger.error(f"[LLM] Error: {e}")
+                            generation.update(output=f"Error: {str(e)}", metadata={"error": True})
+                            return None, 0
+
+                root_span.update(output={"response": response_text, "tokens": total_tokens})
+            return response_text, total_tokens
         except Exception as e:
             logger.warning(f"[Langfuse] Error in tracing: {e}")
-            # Fall through to non-traced call
-    
-    # Fallback: Call LLM without Langfuse tracing
+
+    # Fallback no tracing
     try:
         logger.info(f"[LLM] Calling {LLM_URL} (no tracing)...")
         resp = requests.post(
             f"{LLM_URL}/api/generate",
             json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
-            timeout=30
+            timeout=30,
         )
-        
         if not resp.ok:
             logger.error(f"[LLM] Error: HTTP {resp.status_code}")
-            return None
-        
-        return resp.json().get("response", "")
-        
+            return None, 0
+        response_text = resp.json().get("response", "")
+        total_tokens = int(len((prompt + response_text).split()) * 1.3)
+        return response_text, total_tokens
     except Exception as e:
         logger.error(f"[LLM] Error: {e}")
-        return None
+        return None, 0
+
 
 def parse_json(text: str) -> dict:
     try:
         s, e = text.find("{"), text.rfind("}") + 1
         return json.loads(text[s:e]) if s != -1 and e > s else {}
-    except:
+    except Exception:
         return {}
+
 
 # ============ PROMETHEUS ============
 async def fetch_metrics_from_target(target_url: str) -> List[Dict]:
-    """Fetch metrics from a specific target"""
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
                 f"{target_url}/api/v1/query",
-                params={"query": '{__name__=~".+"}'}
+                params={"query": '{__name__=~".+"}'},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -339,7 +471,7 @@ async def fetch_metrics_from_target(target_url: str) -> List[Dict]:
                 if value is not None and value != "":
                     try:
                         metrics.append({"name": name, "value": float(value), "instance": instance})
-                    except:
+                    except Exception:
                         metrics.append({"name": name, "value": value, "instance": instance})
             return metrics
     except Exception as e:
@@ -347,34 +479,28 @@ async def fetch_metrics_from_target(target_url: str) -> List[Dict]:
         return []
 
 async def fetch_metrics() -> List[Dict]:
-    """Fetch metrics from all configured targets"""
     db = get_db()
     if db is None:
         return []
 
-    # Get all enabled targets from MongoDB
     targets = list(db.targets.find({"enabled": True}))
-
-    # If no targets, use default PROM_URL
     if not targets:
         return await fetch_metrics_from_target(PROM_URL)
 
-    # Fetch from all targets
-    all_metrics = []
+    all_metrics: List[Dict] = []
     for target in targets:
         target_url = f"http://{target['endpoint']}"
         metrics = await fetch_metrics_from_target(target_url)
         all_metrics.extend(metrics)
-
     return all_metrics
 
+
 # ============ EMAIL ============
-def send_alert(subject: str, body: str):
+def send_alert(subject: str, body: str) -> bool:
     db = get_db()
     if db is None:
         return False
 
-    # Get email config from MongoDB
     config = db.email_config.find_one({})
     if not config or not config.get("enabled"):
         return False
@@ -399,6 +525,7 @@ def send_alert(subject: str, body: str):
         logger.error(f"[Email] Error: {e}")
         return False
 
+
 # ============ ANOMALY DETECTION ============
 def update_history(name: str, value: float):
     if name not in metric_history:
@@ -406,14 +533,14 @@ def update_history(name: str, value: float):
     metric_history[name].append(value)
 
 def detect_anomalies(metrics: List[Dict]) -> List[Dict]:
-    anomalies = []
+    anomalies: List[Dict] = []
 
     for m in metrics:
         name, value = m["name"], m["value"]
         instance = m.get("instance", "unknown")
 
         if isinstance(value, (int, float)):
-            update_history(name, value)
+            update_history(name, float(value))
 
         # Threshold check
         for pattern, rules in THRESHOLDS.items():
@@ -421,22 +548,10 @@ def detect_anomalies(metrics: List[Dict]) -> List[Dict]:
                 try:
                     val = float(value)
                     if "min" in rules and val < rules["min"]:
-                        anomalies.append({
-                            "metric": name,
-                            "value": val,
-                            "instance": instance,
-                            "severity": rules["severity"],
-                            "reason": rules["msg"]
-                        })
+                        anomalies.append({"metric": name, "value": val, "instance": instance, "severity": rules["severity"], "reason": rules["msg"]})
                     if "max" in rules and val > rules["max"]:
-                        anomalies.append({
-                            "metric": name,
-                            "value": val,
-                            "instance": instance,
-                            "severity": rules["severity"],
-                            "reason": rules["msg"]
-                        })
-                except:
+                        anomalies.append({"metric": name, "value": val, "instance": instance, "severity": rules["severity"], "reason": rules["msg"]})
+                except Exception:
                     pass
 
         # Z-score check
@@ -446,22 +561,14 @@ def detect_anomalies(metrics: List[Dict]) -> List[Dict]:
                 avg = sum(history) / len(history)
                 std = (sum((x - avg) ** 2 for x in history) / len(history)) ** 0.5
                 if std > 0:
-                    z = abs(value - avg) / std
+                    z = abs(float(value) - avg) / std
                     if z > Z_THRESHOLD:
-                        anomalies.append({
-                            "metric": name,
-                            "value": value,
-                            "instance": instance,
-                            "severity": "medium",
-                            "reason": f"Statistical outlier (z={z:.1f})"
-                        })
-
+                        anomalies.append({"metric": name, "value": float(value), "instance": instance, "severity": "medium", "reason": f"Statistical outlier (z={z:.1f})"})
     return anomalies
 
-# ============ LLM ANALYSIS WITH LANGFUSE ============
-async def get_llm_analysis(anomaly: Dict, metrics: List[Dict], anomaly_id: str) -> Dict:
-    """Get LLM analysis with Langfuse tracking"""
-    
+
+# ============ LLM ANALYSIS WITH LANGFUSE v3.12+ & SESSION ============
+async def get_llm_analysis(anomaly: Dict, metrics: List[Dict], anomaly_id: str, session_id: str) -> Dict:
     context = "\n".join([f"- {m['name']}: {m['value']}" for m in metrics[:15]])
 
     prompt = f"""Anomaly detected:
@@ -477,89 +584,90 @@ Related metrics:
 Analyze this anomaly and respond with ONLY valid JSON in this format:
 {{"summary": "technical one-line description", "simplified": "simple explanation for non-technical users (ELI5)", "cause": "most likely root cause", "fix": "specific remediation steps"}}"""
 
-    # Call LLM with tracking
     metadata = {
         "anomaly_id": str(anomaly_id),
-        "metric": anomaly['metric'],
-        "severity": anomaly.get('severity', 'unknown'),
-        "instance": anomaly.get('instance', 'unknown')
+        "metric": anomaly["metric"],
+        "severity": anomaly.get("severity", "unknown"),
+        "instance": anomaly.get("instance", "unknown"),
     }
-    
-    resp = await asyncio.get_event_loop().run_in_executor(
+
+    result = await asyncio.get_event_loop().run_in_executor(
         None,
         ask_llm,
         prompt,
         f"RCA: {anomaly['metric']}",
-        metadata
+        metadata,
+        session_id,
     )
-    
-    # Parse response
+
+    resp, _tokens = result if result else (None, 0)
     parsed = parse_json(resp) if resp else {}
-    
-    # Score quality in Langfuse
-    if langfuse and parsed:
+
+    if langfuse and LANGFUSE_ENABLED and parsed:
         try:
-            quality = 0
+            quality = 0.0
             if parsed.get("summary"): quality += 0.33
             if parsed.get("cause"): quality += 0.33
             if parsed.get("fix"): quality += 0.34
-            
-            langfuse.score(
-                name="rca_completeness",
-                value=quality,
-                comment=f"Fields present: {list(parsed.keys())}"
-            )
-            
-            logger.info(f"[Langfuse] ✅ Quality score: {quality:.2f}")
+            logger.info(f"[Langfuse] RCA quality score: {quality:.2f}")
         except Exception as e:
-            logger.warning(f"[Langfuse] Could not add score: {e}")
-    
+            logger.warning(f"[Langfuse] Could not calculate score: {e}")
+
     return parsed or {
         "summary": anomaly["reason"],
         "cause": "Unknown - LLM unavailable or parsing failed",
-        "fix": "Check logs and investigate manually"
+        "fix": "Check logs and investigate manually",
     }
 
-# ============ MONITORING SESSION TRACKING ============
+
+# ============ MONITORING SESSION TRACKING (Langfuse v3.12+) ============
 class MonitoringSession:
-    """Track entire monitoring cycle in Langfuse v3"""
-    
+    """Track entire monitoring cycle in Langfuse v3.12+"""
+
     def __init__(self, timestamp: str):
         self.timestamp = timestamp
-        self.span = None
+        self.session_id = f"monitor-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        self.root_span = None
         self._context = None
-        
-        if langfuse:
+        self._propagate_ctx = None
+
+        if langfuse and LANGFUSE_ENABLED:
             try:
-                # Use context manager for span
                 self._context = langfuse.start_as_current_observation(
                     as_type="span",
                     name="Monitoring Cycle",
-                    metadata={
-                        "timestamp": timestamp,
-                        "cycle_type": "scheduled"
-                    }
+                    metadata={"timestamp": timestamp, "cycle_type": "scheduled", "session_id": self.session_id},
                 )
-                self.span = self._context.__enter__()
+                self.root_span = self._context.__enter__()
+
+                self._propagate_ctx = propagate_attributes(session_id=self.session_id)
+                self._propagate_ctx.__enter__()
+
+                logger.info(f"[Session] Started monitoring session: {self.session_id}")
             except Exception as e:
-                logger.warning(f"[Langfuse] Could not start monitoring span: {e}")
+                logger.warning(f"[Langfuse] Could not start monitoring trace: {e}")
+                self.root_span = None
                 self._context = None
-                self.span = None
-    
+                self._propagate_ctx = None
+
     def end(self, metrics_count: int = 0, anomalies_count: int = 0, success: bool = True):
-        """End monitoring session"""
-        if self.span and self._context:
+        if self.root_span and self._context:
             try:
-                self.span.update(
-                    output={
-                        "metrics_collected": metrics_count,
-                        "anomalies_detected": anomalies_count,
-                        "success": success
-                    }
+                self.root_span.update(
+                    output={"metrics_collected": metrics_count, "anomalies_detected": anomalies_count, "success": success}
                 )
+
+                if self._propagate_ctx:
+                    try:
+                        self._propagate_ctx.__exit__(None, None, None)
+                    except Exception:
+                        pass
+
                 self._context.__exit__(None, None, None)
+                logger.info(f"[Session] Ended monitoring session: {self.session_id}")
             except Exception as e:
                 logger.warning(f"[Langfuse] Could not end monitoring span: {e}")
+
 
 # ============ MONITOR LOOP ============
 async def monitor():
@@ -568,14 +676,12 @@ async def monitor():
 
     while True:
         ts = datetime.now().strftime("%H:%M:%S")
-        
-        # Start monitoring session tracking
         session = MonitoringSession(ts)
 
         try:
             db = get_db()
 
-            # 1. Fetch metrics from all targets
+            # 1) Fetch metrics
             metrics = await fetch_metrics()
             if not metrics:
                 logger.info(f"[{ts}] No metrics from Prometheus")
@@ -585,22 +691,18 @@ async def monitor():
 
             logger.info(f"[{ts}] Fetched {len(metrics)} metrics")
 
-            # 2. Save metrics to MongoDB
+            # 2) Save metrics
             if db is not None:
                 try:
                     await asyncio.get_event_loop().run_in_executor(
                         None,
-                        lambda: db.metrics.insert_one({
-                            "timestamp": datetime.utcnow(),
-                            "count": len(metrics),
-                            "data": metrics[:50]
-                        })
+                        lambda: db.metrics.insert_one({"timestamp": datetime.utcnow(), "count": len(metrics), "data": metrics[:50]}),
                     )
                     logger.info(f"[{ts}] Saved metrics to MongoDB")
                 except Exception as e:
                     logger.error(f"[{ts}] MongoDB save error: {e}")
 
-            # Cleanup old documents
+            # Cleanup
             if db is not None:
                 try:
                     await asyncio.get_event_loop().run_in_executor(None, lambda: cleanup_collection(db, "metrics"))
@@ -609,16 +711,15 @@ async def monitor():
                 except Exception as e:
                     logger.error(f"[{ts}] Cleanup error: {e}")
 
-            # 3. Detect anomalies
+            # 3) Detect anomalies
             anomalies = detect_anomalies(metrics)
-
             if not anomalies:
                 logger.info(f"[{ts}] No anomalies")
                 session.end(metrics_count=len(metrics), anomalies_count=0, success=True)
                 await asyncio.sleep(MONITOR_INTERVAL)
                 continue
 
-            # Deduplicate
+            # Deduplicate and limit
             seen = set()
             unique_anomalies = []
             for a in anomalies:
@@ -627,12 +728,11 @@ async def monitor():
                     unique_anomalies.append(a)
             anomalies = unique_anomalies[:3]
 
-            # 4. Process each anomaly
+            # 4) Process anomalies
             for anomaly in anomalies:
                 sev = anomaly["severity"].upper()
                 logger.error(f"[{ts}] ANOMALY [{sev}]: {anomaly['metric']}={anomaly['value']} - {anomaly['reason']}")
 
-                # 5. Save anomaly to MongoDB
                 anomaly_id = None
                 if db is not None:
                     try:
@@ -644,18 +744,21 @@ async def monitor():
                                 "value": anomaly["value"],
                                 "instance": anomaly.get("instance", "unknown"),
                                 "severity": anomaly["severity"],
-                                "reason": anomaly["reason"]
-                            })
+                                "reason": anomaly["reason"],
+                            }),
                         )
                         anomaly_id = result.inserted_id
                     except Exception as e:
                         logger.error(f"[{ts}] Anomaly save error: {e}")
 
-                # 6. Get LLM analysis with Langfuse tracking
-                analysis = await get_llm_analysis(anomaly, metrics, str(anomaly_id) if anomaly_id else "unknown")
+                analysis = await get_llm_analysis(
+                    anomaly,
+                    metrics,
+                    str(anomaly_id) if anomaly_id else "unknown",
+                    session.session_id,
+                )
                 logger.info(f"[{ts}] RCA: {analysis.get('cause')} | Fix: {analysis.get('fix')}")
 
-                # 7. Save RCA to MongoDB
                 if db is not None and anomaly_id is not None:
                     try:
                         await asyncio.get_event_loop().run_in_executor(
@@ -668,13 +771,13 @@ async def monitor():
                                 "summary": analysis.get("summary"),
                                 "simplified": analysis.get("simplified"),
                                 "cause": analysis.get("cause"),
-                                "fix": analysis.get("fix")
-                            })
+                                "fix": analysis.get("fix"),
+                            }),
                         )
                     except Exception as e:
                         logger.error(f"[{ts}] RCA save error: {e}")
 
-                # 8. Send email
+                # Email
                 body = f"""
                 <h2>{sev} Anomaly</h2>
                 <p><b>Metric:</b> {anomaly['metric']}</p>
@@ -688,8 +791,24 @@ async def monitor():
                 """
                 if send_alert(f"[{sev}] {anomaly['metric']}", body):
                     logger.info(f"[{ts}] Email sent")
-            
-            # End session successfully
+
+                # Slack (ENV ONLY)
+                try:
+                    slack_msg = (
+                        f"[{sev}] Anomaly\n"
+                        f"Metric: {anomaly['metric']}\n"
+                        f"Instance: {anomaly.get('instance','unknown')}\n"
+                        f"Value: {anomaly['value']}\n"
+                        f"Reason: {anomaly['reason']}\n"
+                        f"Cause: {analysis.get('cause')}\n"
+                        f"Fix: {analysis.get('fix')}\n"
+                        f"Session: {session.session_id}"
+                    )
+                    if send_slack_alert_text(slack_msg):
+                        logger.info(f"[{ts}] Slack sent")
+                except Exception as e:
+                    logger.error(f"[{ts}] Slack send error: {e}")
+
             session.end(metrics_count=len(metrics), anomalies_count=len(anomalies), success=True)
 
         except Exception as e:
@@ -698,39 +817,59 @@ async def monitor():
 
         await asyncio.sleep(MONITOR_INTERVAL)
 
+
 # ============ FASTAPI ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Monitor started | Prometheus: {PROM_URL} | LLM: {LLM_MODEL}")
     logger.info(f"MongoDB URI: {MONGO_URI[:30] if MONGO_URI else 'NOT SET'}...")
-    status_msg = "✅ Enabled (v3)" if LANGFUSE_ENABLED else "❌ Disabled"
+
+    status_msg = "✅ Enabled (v3.12+)" if LANGFUSE_ENABLED else "❌ Disabled"
     if not LANGFUSE_ENABLED:
         status_msg += f" (Module: {LANGFUSE_AVAILABLE}, PK: {bool(LANGFUSE_PUBLIC_KEY)}, SK: {bool(LANGFUSE_SECRET_KEY)})"
     logger.info(f"Langfuse: {status_msg}")
 
-    # Initialize default email config
+    logger.info(f"Slack: {'✅ Enabled' if slack_is_configured() else '❌ Disabled'}")
+
     db = get_db()
     if db is not None:
+        # default email config
         if not db.email_config.find_one({}):
-            db.email_config.insert_one({
-                "enabled": False,
-                "recipients": []
-            })
+            db.email_config.insert_one({"enabled": False, "recipients": []})
             logger.info("[Email] Initialized default config")
 
+        # indexes for chat sessions
+        try:
+            db.chat_sessions.create_index("session_id", unique=True)
+            db.chat_sessions.create_index("last_activity")
+            logger.info("[Session] Created database indexes")
+        except Exception as e:
+            logger.warning(f"[Session] Index creation warning: {e}")
+
     task = asyncio.create_task(monitor())
+
+    async def cleanup_sessions():
+        while True:
+            await asyncio.sleep(3600)
+            db2 = get_db()
+            if db2:
+                session_manager.cleanup_old_sessions(db2, hours=24)
+
+    cleanup_task = asyncio.create_task(cleanup_sessions())
+
     yield
-    
-    # Shutdown: Flush Langfuse data
-    if langfuse:
+
+    if langfuse and LANGFUSE_ENABLED:
         try:
             logger.info("[Langfuse] Flushing remaining data...")
             langfuse.flush()
             logger.info("[Langfuse] ✅ Flush complete")
         except Exception as e:
             logger.warning(f"[Langfuse] Flush error: {e}")
-    
+
     task.cancel()
+    cleanup_task.cancel()
+
 
 app = FastAPI(title="AI DevOps Monitor", lifespan=lifespan)
 app.add_middleware(
@@ -738,24 +877,26 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 Instrumentator().instrument(app).expose(app)
 
-# ============ API ENDPOINTS ============
 
+# ============ API ENDPOINTS ============
 @app.get("/")
 def root():
     return {
         "status": "running",
         "prometheus": PROM_URL,
         "llm": LLM_MODEL,
-        "langfuse": "enabled (v3)" if LANGFUSE_ENABLED else "disabled"
+        "langfuse": "enabled (v3.12+)" if LANGFUSE_ENABLED else "disabled",
+        "sessions": "enabled",
+        "slack": "enabled" if slack_is_configured() else "disabled",
+        "slack_webhook_set": bool((SLACK_WEBHOOK_URL or "").strip()),
     }
 
 @app.get("/stats")
 def get_stats():
-    """Get statistics for dashboard"""
     db = get_db()
     if db is None:
         return {"collections": {}}
@@ -766,15 +907,18 @@ def get_stats():
             "anomalies": {
                 "total": db.anomalies.count_documents({}),
                 "open": db.anomalies.count_documents({"severity": {"$in": ["critical", "high"]}}),
-                "analyzed": db.rca.count_documents({})
+                "analyzed": db.rca.count_documents({}),
             },
-            "rca_results": {"total": db.rca.count_documents({})}
+            "rca_results": {"total": db.rca.count_documents({})},
+            "chat_sessions": {
+                "total": db.chat_sessions.count_documents({}),
+                "active": db.chat_sessions.count_documents({"last_activity": {"$gte": datetime.utcnow() - timedelta(hours=1)}}),
+            },
         }
     }
 
 @app.get("/prom-metrics")
 def get_prom_metrics():
-    """Get recent metrics"""
     db = get_db()
     if db is None:
         return {"metrics": []}
@@ -807,15 +951,24 @@ def get_rca():
         d["timestamp"] = d["timestamp"].isoformat()
     return {"rca": docs}
 
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(message: ChatMessage):
-    """General AI chat endpoint with Langfuse tracking"""
+    db = get_db()
+
+    session_id = message.session_id
+    if not session_id or not session_manager.get_session(session_id, db):
+        session_id = session_manager.create_session(db)
+        logger.info(f"[Chat] New conversation session: {session_id}")
+    else:
+        logger.info(f"[Chat] Continuing session: {session_id}")
+
     context_str = ""
     if message.context:
-        # Format context for prompt
         context_lines = ["Context:"]
         for k, v in message.context.items():
-            context_lines.append(f"- {k}: {v}")
+            if k != "session_id":
+                context_lines.append(f"- {k}: {v}")
         context_str = "\n".join(context_lines)
 
     prompt = f"""You are a helpful DevOps assistant.
@@ -825,23 +978,72 @@ User asks: {message.message}
 
 Provide a helpful, concise answer. Explain technical concepts simply if asked."""
 
-    # Call LLM
-    response = await asyncio.get_event_loop().run_in_executor(
+    result = await asyncio.get_event_loop().run_in_executor(
         None,
         ask_llm,
         prompt,
         "AI Chat",
-        {"user_message": message.message, **message.context}
+        {"user_message": message.message, **message.context},
+        session_id,
     )
 
-    return {"response": response or "Sorry, I'm having trouble connecting to the AI service."}
+    response_text, tokens = result if result else (None, 0)
+    session_manager.update_session(session_id, db, tokens)
+
+    return {
+        "response": response_text or "Sorry, I'm having trouble connecting to the AI service.",
+        "session_id": session_id,
+    }
+
+
+# ============ SESSION MANAGEMENT ENDPOINTS ============
+@app.get("/api/sessions")
+def get_sessions():
+    db = get_db()
+    if db is None:
+        return {"sessions": []}
+
+    sessions = list(db.chat_sessions.find().sort("last_activity", -1).limit(50))
+    for s in sessions:
+        s["_id"] = str(s["_id"])
+        s["created_at"] = s["created_at"].isoformat()
+        s["last_activity"] = s["last_activity"].isoformat()
+    return {"sessions": sessions}
+
+@app.get("/api/sessions/{session_id}")
+def get_session_details(session_id: str):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    session = session_manager.get_session(session_id, db)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session["_id"] = str(session["_id"])
+    session["created_at"] = session["created_at"].isoformat()
+    session["last_activity"] = session["last_activity"].isoformat()
+    return session
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+
+    result = db.chat_sessions.delete_one({"session_id": session_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session_id in session_manager.active_sessions:
+        del session_manager.active_sessions[session_id]
+
+    return {"message": "Session deleted successfully"}
 
 
 # ============ EMAIL CONFIG ENDPOINTS ============
-
 @app.get("/agent/email-config")
 def get_email_config():
-    """Get email configuration"""
     db = get_db()
     if db is None:
         return {"enabled": False, "recipients": []}
@@ -850,67 +1052,79 @@ def get_email_config():
     if not config:
         return {"enabled": False, "recipients": []}
 
-    return {
-        "enabled": config.get("enabled", False),
-        "recipients": config.get("recipients", [])
-    }
+    return {"enabled": config.get("enabled", False), "recipients": config.get("recipients", [])}
 
 @app.put("/agent/email-config")
 def update_email_config(config: EmailConfig):
-    """Update email configuration"""
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
 
     db.email_config.update_one(
         {},
-        {"$set": {
-            "enabled": config.enabled,
-            "recipients": config.recipients
-        }},
-        upsert=True
+        {"$set": {"enabled": config.enabled, "recipients": config.recipients}},
+        upsert=True,
     )
-
     return {"message": "Email config updated"}
 
 @app.post("/agent/test-email")
 def send_test_email():
-    """Send a test email"""
     success = send_alert(
         "[TEST] AI DevOps Monitor",
         """
         <h2>Test Email</h2>
         <p>This is a test email from your AI DevOps Monitoring system.</p>
         <p>If you received this, your email configuration is working correctly!</p>
-        """
+        """,
     )
-
     if success:
         return {"message": "Test email sent successfully!"}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to send test email. Check your configuration.")
+    raise HTTPException(status_code=500, detail="Failed to send test email. Check your configuration.")
+
+
+# ============ SLACK TEST ENDPOINT (ENV ONLY) ============
+@app.get("/agent/slack-status")
+def slack_status():
+    return {
+        "enabled_flag": bool(SLACK_ENABLED),
+        "webhook_url_set": bool((SLACK_WEBHOOK_URL or "").strip()),
+        "active": slack_is_configured(),
+    }
+
+@app.post("/agent/test-slack")
+def test_slack():
+    if not slack_is_configured():
+        raise HTTPException(status_code=400, detail="Slack is not configured. Set SLACK_ENABLED=true and SLACK_WEBHOOK_URL.")
+    ok = send_slack_alert_text("[TEST] AI DevOps Monitor: Slack webhook is working ✅")
+    if ok:
+        return {"message": "Test Slack message sent successfully!"}
+    raise HTTPException(status_code=500, detail="Failed to send Slack message. Check webhook / network.")
+
 
 # ============ LANGFUSE STATUS ENDPOINT ============
-
 @app.get("/langfuse/status")
 def get_langfuse_status():
-    """Get Langfuse v3 connection status"""
     status = {
         "installed": LANGFUSE_AVAILABLE,
         "enabled": LANGFUSE_ENABLED,
-        "version": "v3",
+        "version": "v3.12+",
         "host": LANGFUSE_HOST if LANGFUSE_ENABLED else None,
-        "connected": False
+        "connected": False,
+        "session_tracking": True,
+        "api_methods": {
+            "tracing": "start_as_current_observation()",
+            "sessions": "propagate_attributes(session_id=...)",
+            "decorator": "@observe",
+        },
     }
-    
-    if langfuse:
+    if langfuse and LANGFUSE_ENABLED:
         try:
             langfuse.auth_check()
             status["connected"] = True
         except Exception as e:
             status["error"] = str(e)
-    
     return status
+
 
 if __name__ == "__main__":
     import uvicorn

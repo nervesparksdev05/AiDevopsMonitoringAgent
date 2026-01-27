@@ -28,3 +28,6 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 _emails = os.getenv("ALERT_EMAILS", "") or os.getenv("ALERT_EMAIL", "")
 ALERT_EMAILS = [e.strip() for e in _emails.split(",") if e.strip()]
 
+# Slack (Incoming Webhook)
+SLACK_ENABLED = os.getenv("SLACK_ENABLED", "false").strip().lower() in ("1", "true", "yes", "y", "on")
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "").strip()
