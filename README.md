@@ -1,31 +1,92 @@
 ```markdown
-# AI DevOps Monitor (FastAPI + Prometheus + MongoDB + LLM)
+# AI DevOps Monitor
+**FastAPI + Prometheus + MongoDB + LLM (+ optional Email + Slack)**
 
-A lightweight DevOps monitoring service that:
-- Pulls metrics from **Prometheus**
-- Detects **anomalies** (threshold + z-score)
-- Generates **RCA (root cause + fix)** using an **LLM**
-- Stores everything in **MongoDB**
-- Optionally sends **email alerts**
-- Exposes APIs + Prometheus `/metrics` for Grafana dashboards
+A lightweight monitoring service that:
+- pulls metrics from **Prometheus**
+- detects **anomalies** (threshold + z-score)
+- generates **RCA (root cause + fix)** using an **LLM**
+- stores everything in **MongoDB**
+- optionally sends **email alerts**
+- optionally sends **Slack alerts (ENV only)**
+- exposes REST APIs + Prometheus `/metrics` for Grafana dashboards
+
+---
+
+## Table of Contents
+- [What this does](#what-this-does)
+- [Architecture (high level)](#architecture-high-level)
+- [Features](#features)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Configuration](#configuration)
+  - [.env example](#env-example)
+  - [config.py reference](#configpy-reference)
+  - [Prometheus targets (optional)](#prometheus-targets-optional)
+- [Run](#run)
+- [MongoDB Collections](#mongodb-collections)
+- [API Endpoints](#api-endpoints)
+- [Anomaly Detection](#anomaly-detection)
+- [RCA via LLM](#rca-via-llm)
+- [Alerts](#alerts)
+  - [Email](#email)
+  - [Slack (ENV only)](#slack-env-only)
+- [Data Retention](#data-retention)
+- [Grafana Setup](#grafana-setup)
+- [Troubleshooting](#troubleshooting)
+- [Security Notes](#security-notes)
+
+---
+
+## What this does
+
+Every `MONITOR_INTERVAL` seconds, the monitor:
+1. Queries Prometheus for metrics.
+2. Stores a sampled snapshot in MongoDB (`metrics`).
+3. Runs anomaly detection:
+   - **Threshold rules** (e.g., CPU > 80)
+   - **Z-score outlier detection** (rolling window)
+4. Stores anomalies in MongoDB (`anomalies`).
+5. For each anomaly, asks the LLM for RCA (root cause + fix).
+6. Stores RCA in MongoDB (`rca`).
+7. Optionally sends alerts:
+   - Email (SMTP + MongoDB-driven enable/recipients)
+   - Slack (webhook via env only)
+
+---
+
+## Architecture (high level)
+
+- **FastAPI**: runs the service + exposes endpoints
+- **Prometheus**: metrics source (your services + exporters)
+- **MongoDB**: storage for snapshots/anomalies/rca/config/sessions
+- **LLM**: generates RCA (Ollama-style `/api/generate`)
+- **Instrumentator**: exposes `/metrics` for scraping
 
 ---
 
 ## Features
 
-- ✅ Periodic Prometheus metric collection
-- ✅ Anomaly detection:
-  - Rule-based **threshold checks**
-  - Statistical **z-score** outlier detection
-- ✅ RCA via LLM (JSON output: summary, cause, fix)
-- ✅ Stores:
-  - raw metrics (sampled)
-  - anomalies
-  - RCA results
-  - email configuration
-- ✅ Email alerts (SMTP + MongoDB-driven enable/recipients)
-- ✅ FastAPI endpoints for dashboard integration
-- ✅ `/metrics` endpoint exposed for Prometheus scraping (via Instrumentator)
+### Monitoring + Storage
+- ✅ Periodic Prometheus metric collection  
+- ✅ Stores sampled metric snapshots to MongoDB  
+- ✅ Stores anomalies + RCA to MongoDB  
+- ✅ Multi-target support (optional via MongoDB `targets`)
+
+### Detection + RCA
+- ✅ Threshold-based anomaly detection
+- ✅ Z-score based outlier detection
+- ✅ RCA generation via LLM (JSON output)
+
+### Alerting
+- ✅ Email alerts (SMTP)
+- ✅ Slack alerts via incoming webhook (**env only**)
+
+### Ops / Observability
+- ✅ `/metrics` endpoint for Prometheus scraping (FastAPI Instrumentator)
+- ✅ Dashboard-friendly APIs (`/stats`, `/anomalies`, `/rca`)
+- ✅ Session tracking for chat + monitoring traces (Langfuse optional)
 
 ---
 
@@ -36,7 +97,7 @@ A lightweight DevOps monitoring service that:
 fastapi_metrics/
 ├─ main.py
 ├─ config.py
-├─ .env                # optional (if your config.py loads env)
+├─ .env                 # optional
 ├─ requirements.txt
 └─ README.md
 
@@ -44,23 +105,25 @@ fastapi_metrics/
 
 ---
 
-## Requirements
+## Prerequisites
 
-- Python 3.10+
-- Prometheus running locally or remotely
-- MongoDB running locally or remotely
-- LLM endpoint (example: Ollama-style `/api/generate`)
+- Python **3.10+**
+- Prometheus (local or remote)
+- MongoDB (local or remote)
+- LLM endpoint (example: Ollama-style API)
 
 ---
 
-## Install
+## Installation
 
-### 1) Create venv + install dependencies
+### 1) Create venv and install dependencies
 
 ```bash
 python -m venv .venv
+
 # Windows:
 .venv\Scripts\activate
+
 # Mac/Linux:
 source .venv/bin/activate
 
@@ -71,40 +134,86 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Your `main.py` imports from `config.py`:
+Your `main.py` imports settings from `config.py`, and `config.py` reads env vars.
+
+### .env example
+
+Minimal required for the system to run:
+
+```env
+# Prometheus
+PROM_URL=http://localhost:9090
+
+# MongoDB
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB=observability
+
+# LLM (Ollama style)
+LLM_URL=http://localhost:11434
+LLM_MODEL=llama3.2
+
+# Monitoring
+MONITOR_INTERVAL=30
+Z_THRESHOLD=3.0
+MAX_DOCS=100
+```
+
+Optional email:
+
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your@gmail.com
+SMTP_PASSWORD=app_password_here
+```
+
+Optional Slack (**only 2 vars required**):
+
+```env
+SLACK_ENABLED=true
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
+```
+
+Optional Langfuse:
+
+```env
+LANGFUSE_PUBLIC_KEY=...
+LANGFUSE_SECRET_KEY=...
+LANGFUSE_HOST=https://cloud.langfuse.com
+```
+
+---
+
+### config.py reference
+
+Your `config.py` should expose values like:
 
 ```py
 PROM_URL, MONGO_URI, DB_NAME,
 LLM_URL, LLM_MODEL,
 MONITOR_INTERVAL, Z_THRESHOLD, MAX_DOCS,
-SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_EMAILS
+SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, ALERT_EMAILS,
+SLACK_ENABLED, SLACK_WEBHOOK_URL
 ```
 
-### Example `config.py` (reference)
+> **Note:** Email recipients are taken from MongoDB (`email_config`), not `ALERT_EMAILS`.
 
-```python
-import os
+---
 
-PROM_URL = os.getenv("PROM_URL", "http://localhost:9090")
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-DB_NAME = os.getenv("DB_NAME", "ai_devops_monitor")
+### Prometheus targets (optional)
 
-LLM_URL = os.getenv("LLM_URL", "http://localhost:11434")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss:latest")
+If MongoDB has enabled target documents in `targets`, the service will scrape those instead of only `PROM_URL`.
 
-MONITOR_INTERVAL = int(os.getenv("MONITOR_INTERVAL", "10"))  # seconds
-Z_THRESHOLD = float(os.getenv("Z_THRESHOLD", "2.5"))
-MAX_DOCS = int(os.getenv("MAX_DOCS", "100"))
+Example document:
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-
-ALERT_EMAILS = os.getenv("ALERT_EMAILS", "")
+```json
+{
+  "name": "my-prom",
+  "endpoint": "localhost:9090",
+  "job": "serviceA",
+  "enabled": true
+}
 ```
-
-> **Note:** Email recipients are primarily taken from MongoDB `email_config` collection (not `ALERT_EMAILS`).
 
 ---
 
@@ -112,15 +221,13 @@ ALERT_EMAILS = os.getenv("ALERT_EMAILS", "")
 
 ### 1) Start MongoDB
 
-**Local example**
+Local example:
 
 ```bash
 mongod
 ```
 
 ### 2) Start Prometheus
-
-Run Prometheus with your `prometheus.yml` (example):
 
 ```bash
 prometheus --config.file=prometheus.yml
@@ -138,8 +245,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Verify:
 
-* API root: `http://localhost:8000/`
-* Prometheus metrics endpoint: `http://localhost:8000/metrics`
+* Root: `http://localhost:8000/`
+* FastAPI metrics: `http://localhost:8000/metrics`
 
 ---
 
@@ -147,23 +254,14 @@ Verify:
 
 Database: `DB_NAME`
 
-Collections created/used:
-
-* `metrics`
-
-  * Stores periodic snapshots (count + up to 50 metrics sample)
-* `anomalies`
-
-  * Stores anomalies detected (threshold or z-score)
-* `rca`
-
-  * Stores LLM RCA outputs linked with `anomaly_id`
-* `targets`
-
-  * Optional: list of Prometheus endpoints to scrape from MongoDB
-* `email_config`
-
-  * Stores email enabled flag + recipients list
+| Collection      | Purpose                                               |
+| --------------- | ----------------------------------------------------- |
+| `metrics`       | periodic metric snapshots (count + sample of metrics) |
+| `anomalies`     | detected anomalies with severity/reason               |
+| `rca`           | LLM RCA output linked to anomaly                      |
+| `targets`       | optional list of Prometheus endpoints                 |
+| `email_config`  | email enabled + recipients                            |
+| `chat_sessions` | chat session metadata (tokens, messages, timestamps)  |
 
 ---
 
@@ -172,122 +270,110 @@ Collections created/used:
 ### Health / Info
 
 * `GET /`
-
-  * Returns running status + configured Prometheus + model
+  Shows service status and whether Slack/Langfuse are enabled.
 
 ### Dashboard stats
 
 * `GET /stats`
-
-  * Returns counts for metrics/anomalies/rca
+  Counts for metrics/anomalies/rca/chat sessions.
 
 ### Data
 
-* `GET /prom-metrics`
+* `GET /prom-metrics` — last 10 metric snapshots
+* `GET /anomalies` — last 20 anomalies
+* `GET /rca` — last 20 RCA results
 
-  * Returns last 10 metric snapshots
-* `GET /anomalies`
+### Chat (LLM)
 
-  * Returns last 20 anomalies
-* `GET /rca`
+* `POST /api/chat` — returns response + `session_id`
 
-  * Returns last 20 RCA results
+Body:
+
+```json
+{
+  "message": "What does high CPU mean?",
+  "context": {},
+  "session_id": null
+}
+```
 
 ### Email config
 
 * `GET /agent/email-config`
 * `PUT /agent/email-config`
-
-  * Body:
-
-    ```json
-    {
-      "enabled": true,
-      "recipients": ["you@example.com"]
-    }
-    ```
 * `POST /agent/test-email`
 
-  * Sends a test email if SMTP creds + config are valid
-
----
-
-## Prometheus Targets (Optional)
-
-If `targets` collection contains enabled targets, the system pulls metrics from them instead of only `PROM_URL`.
-
-Example document in `targets`:
+Body for PUT:
 
 ```json
 {
-  "name": "my-service",
-  "endpoint": "localhost:9090",
-  "job": "serviceA",
-  "enabled": true
+  "enabled": true,
+  "recipients": ["you@example.com"]
 }
 ```
 
+### Slack (env only)
+
+* `GET /agent/slack-status`
+* `POST /agent/test-slack`
+
+> No Slack config is stored in MongoDB in the env-only setup.
+
 ---
 
-## Anomaly Detection Rules
+## Anomaly Detection
 
-### Threshold rules (built-in)
+### 1) Threshold rules (built-in)
 
 Examples:
 
-* `up < 1` → critical
-* `cpu_usage > 80` → high
-* `memory_usage > 80` → high
-* `http_request_duration_seconds > 5` → high
-* `errors_total > 10` → high
-* `disk_usage > 90` → critical
+* `up < 1` → **critical**
+* `cpu_usage > 80` → **high**
+* `memory_usage > 80` → **high**
+* `http_request_duration_seconds > 5` → **high**
+* `errors_total > 10` → **high**
+* `disk_usage > 90` → **critical**
 
-### Z-score rules
+### 2) Z-score outliers
 
-* Uses rolling history of last **10** values per metric
-* Needs at least **5 values** before detecting outliers
-* Flags if `z > Z_THRESHOLD`
-
----
-
-## Data Retention / Cleanup
-
-The monitor enforces `MAX_DOCS` retention for:
-
-* `metrics`
-* `anomalies`
-* `rca`
-
-Oldest documents are deleted when the collection exceeds `MAX_DOCS`.
+* Maintains a rolling history of last **10** values per metric
+* Needs at least **5 samples** before detecting outliers
+* Flags outlier if `z > Z_THRESHOLD`
 
 ---
 
-## Troubleshooting
+## RCA via LLM
 
-### 1) “Database objects do not implement truth value testing”
+For each anomaly, the service builds a prompt with:
 
-✅ Fixed by using explicit checks:
+* anomaly details (metric/value/severity/reason)
+* a small context window (top ~15 metrics)
 
-* `if db is None:` instead of `if not db:`
-* `if db is not None:` instead of `if db:`
+Expected LLM output: **valid JSON**
 
-### 2) No anomalies visible
+```json
+{
+  "summary": "one-line technical summary",
+  "simplified": "ELI5 explanation",
+  "cause": "most likely root cause",
+  "fix": "specific remediation steps"
+}
+```
 
-* Ensure Prometheus is returning metrics from your targets
-* Increase `MONITOR_INTERVAL` to allow history to build
-* Ensure your service metrics include values that can cross thresholds
-
-### 3) Email not sending
-
-* Enable email config:
-
-  * `PUT /agent/email-config`
-* Ensure `SMTP_USER` and `SMTP_PASSWORD` are set
-* For Gmail, use **App Passwords** (not your normal password)
+If the LLM fails/unavailable, the service stores a fallback RCA.
 
 ---
 
-## Example: Enable email alerts
+## Alerts
+
+### Email
+
+Email alerts are controlled via MongoDB `email_config`:
+
+* enabled flag
+* recipients list
+
+Enable (example):
 
 ```bash
 curl -X PUT http://localhost:8000/agent/email-config \
@@ -301,17 +387,83 @@ Test:
 curl -X POST http://localhost:8000/agent/test-email
 ```
 
+**Gmail note:** Use an **App Password**, not your normal password.
+
 ---
 
-## Grafana Setup (Quick)
+### Slack (ENV only)
 
-1. Add Prometheus datasource:
+Slack alerts are controlled purely via env:
+
+```env
+SLACK_ENABLED=true
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
+```
+
+Test:
+
+```bash
+curl -X POST http://localhost:8000/agent/test-slack
+```
+
+> Incoming webhooks post to the channel you selected while creating the webhook.
+> This setup does not override channel/username via env.
+
+---
+
+## Data Retention
+
+The monitor enforces retention (`MAX_DOCS`) for:
+
+* `metrics`
+* `anomalies`
+* `rca`
+
+When a collection exceeds `MAX_DOCS`, the oldest documents are deleted.
+
+---
+
+## Grafana Setup
+
+1. Add Prometheus datasource in Grafana:
 
    * URL: `http://localhost:9090`
-2. Add dashboard panels using:
 
-   * Prometheus metrics from your services
-   * Your FastAPI `/metrics` endpoint if needed
+2. Create dashboards using:
+
+   * metrics from your services in Prometheus
+   * optional: FastAPI `/metrics` for API runtime stats
 
 ---
 
+## Troubleshooting
+
+### “Database objects do not implement truth value testing”
+
+Use explicit checks:
+
+* ✅ `if db is None:` not `if not db:`
+* ✅ `if db is not None:` not `if db:`
+
+### No anomalies visible
+
+* Confirm Prometheus is returning metrics for your target(s)
+* Increase `MONITOR_INTERVAL` to allow history to build
+* Ensure metric names match your threshold patterns
+* Try lowering thresholds temporarily to validate end-to-end flow
+
+### Email not sending
+
+* Ensure email config enabled via API
+* Ensure `SMTP_USER` and `SMTP_PASSWORD` set
+* Check provider rules (Gmail requires App Password)
+
+### Slack not sending
+
+* Ensure `SLACK_ENABLED=true`
+* Ensure webhook is correct (no quotes, no trailing spaces)
+* Confirm your environment is loaded (`load_dotenv(override=True)`)
+
+---
+
+```
