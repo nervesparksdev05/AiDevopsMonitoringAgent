@@ -27,3 +27,4 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 # Support both ALERT_EMAIL (single) and ALERT_EMAILS (multiple)
 _emails = os.getenv("ALERT_EMAILS", "") or os.getenv("ALERT_EMAIL", "")
 ALERT_EMAILS = [e.strip() for e in _emails.split(",") if e.strip()]
+
