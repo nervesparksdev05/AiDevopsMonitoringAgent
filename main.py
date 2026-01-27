@@ -14,7 +14,10 @@ Langfuse v3 SDK uses:
 - start_as_current_observation() context manager
 - @observe decorator
 """
+import threading #to look  for the threads
+
 import sys
+import io
 import json
 import asyncio
 import smtplib
@@ -27,6 +30,17 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from collections import deque
 import logging
+# adding multithreading 
+
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8")
+
+from concurrent.futures import ThreadPoolExecutor
+
+ANOMALY_WORKERS = 4  # configurable
+anomaly_executor = ThreadPoolExecutor(max_workers=ANOMALY_WORKERS)
+MAIN_EVENT_LOOP = None
+
 
 # Configure logging
 class MultiFileHandler(logging.Handler):
@@ -114,16 +128,16 @@ if LANGFUSE_ENABLED:
         
         # Verify connection
         langfuse.auth_check()
-        logger.info("[Langfuse] ✅ v3 Connected successfully!")
+        logger.info("[Langfuse]  v3 Connected successfully!")
     except Exception as e:
-        logger.error(f"[Langfuse] ❌ Failed to initialize: {e}")
+        logger.error(f"[Langfuse]  Failed to initialize: {e}")
         langfuse = None
         LANGFUSE_ENABLED = False
 else:
     if not LANGFUSE_AVAILABLE:
-        logger.info("[Langfuse] ⚠️ Not installed")
+        logger.info("[Langfuse]  Not installed")
     else:
-        logger.info("[Langfuse] ⚠️ Disabled (API keys not set in .env)")
+        logger.info("[Langfuse]  Disabled (API keys not set in .env)")
 
 # ============ MODELS ============
 class Target(BaseModel):
@@ -146,11 +160,11 @@ class ChatResponse(BaseModel):
 # ============ THRESHOLDS ============
 THRESHOLDS = {
     "up": {"min": 1, "severity": "critical", "msg": "Service is DOWN"},
-    "cpu_usage": {"max": 80, "severity": "high", "msg": "High CPU usage"},
-    "memory_usage": {"max": 80, "severity": "high", "msg": "High memory usage"},
+    "cpu_usage": {"max": 1, "severity": "high", "msg": "High CPU usage"},
+    "memory_usage": {"max": 1, "severity": "high", "msg": "High memory usage"},
     "http_request_duration_seconds": {"max": 5, "severity": "high", "msg": "High latency"},
     "errors_total": {"max": 10, "severity": "high", "msg": "High error count"},
-    "disk_usage": {"max": 90, "severity": "critical", "msg": "Disk almost full"},
+    "disk_usage": {"max": 1, "severity": "critical", "msg": "Disk almost full"},
 }
 
 metric_history: Dict[str, deque] = {}
@@ -174,7 +188,8 @@ def get_db():
                 serverSelectionTimeoutMS=2000,
                 connectTimeoutMS=2000,
                 socketTimeoutMS=2000,
-                maxPoolSize=1
+                maxPoolSize=ANOMALY_WORKERS + 2
+
             )
             _db_connected = False
 
@@ -266,8 +281,29 @@ def ask_llm(prompt: str, trace_name: str = "LLM Call", metadata: dict = None) ->
                             },
                             metadata={"latency_ms": latency_ms, "error": False}
                         )
-                        
-                        logger.info(f"[Langfuse] ✅ Logged generation ({input_tokens + output_tokens} tokens)")
+                        parsed = {}
+                        try:
+                           parsed = parse_json(response_text)
+                        except Exception:
+                           parsed = {}
+
+                        if parsed:
+                            quality = 0.0
+                            if parsed.get("summary"): quality += 0.33
+                            if parsed.get("cause"): quality += 0.33
+                            if parsed.get("fix"): quality += 0.34
+
+                            try:
+                               generation.score(
+                                 name="rca_completeness",
+                                 value=quality,
+                                 comment=f"Fields present: {list(parsed.keys())}"
+        )
+                               logger.info(f"[Langfuse]  RCA quality score: {quality:.2f}")
+                            except Exception as e:
+                              logger.warning(f"[Langfuse] Score failed: {e}")
+
+                        logger.info(f"[Langfuse]  Logged generation ({input_tokens + output_tokens} tokens)")
                         
                     except requests.exceptions.Timeout:
                         logger.error("[LLM] Timeout after 30s")
@@ -485,7 +521,7 @@ Analyze this anomaly and respond with ONLY valid JSON in this format:
         "instance": anomaly.get('instance', 'unknown')
     }
     
-    resp = await asyncio.get_event_loop().run_in_executor(
+    resp = await asyncio.get_running_loop().run_in_executor(
         None,
         ask_llm,
         prompt,
@@ -496,29 +532,9 @@ Analyze this anomaly and respond with ONLY valid JSON in this format:
     # Parse response
     parsed = parse_json(resp) if resp else {}
     
-    # Score quality in Langfuse
-    if langfuse and parsed:
-        try:
-            quality = 0
-            if parsed.get("summary"): quality += 0.33
-            if parsed.get("cause"): quality += 0.33
-            if parsed.get("fix"): quality += 0.34
-            
-            langfuse.score(
-                name="rca_completeness",
-                value=quality,
-                comment=f"Fields present: {list(parsed.keys())}"
-            )
-            
-            logger.info(f"[Langfuse] ✅ Quality score: {quality:.2f}")
-        except Exception as e:
-            logger.warning(f"[Langfuse] Could not add score: {e}")
-    
-    return parsed or {
-        "summary": anomaly["reason"],
-        "cause": "Unknown - LLM unavailable or parsing failed",
-        "fix": "Check logs and investigate manually"
-    }
+ 
+    return parsed
+
 
 # ============ MONITORING SESSION TRACKING ============
 class MonitoringSession:
@@ -561,6 +577,67 @@ class MonitoringSession:
             except Exception as e:
                 logger.warning(f"[Langfuse] Could not end monitoring span: {e}")
 
+#=========adding multithreading++++
+def process_single_anomaly(anomaly, metrics):
+    logger.info(
+    f"[THREAD] name={threading.current_thread().name} "
+    f"id={threading.get_ident()} "
+    f"metric={anomaly['metric']}"
+)
+
+    db = get_db()
+    ts = datetime.now().strftime("%H:%M:%S")
+
+    sev = anomaly["severity"].upper()
+    logger.error(
+        f"[{ts}] ANOMALY [{sev}]: {anomaly['metric']}={anomaly['value']} - {anomaly['reason']}"
+    )
+
+    # Save anomaly
+    result = db.anomalies.insert_one({
+        "timestamp": datetime.utcnow(),
+        "metric": anomaly["metric"],
+        "value": anomaly["value"],
+        "instance": anomaly.get("instance", "unknown"),
+        "severity": anomaly["severity"],
+        "reason": anomaly["reason"]
+    })
+    anomaly_id = result.inserted_id
+
+    # LLM analysis (blocking)
+    
+    future = asyncio.run_coroutine_threadsafe(
+      get_llm_analysis(anomaly, metrics, str(anomaly_id)),
+      MAIN_EVENT_LOOP
+    )
+
+    analysis = future.result() or {}
+
+    logger.info(f"[{ts}] RCA: {analysis.get('cause')} | Fix: {analysis.get('fix')}")
+
+    # Save RCA
+    db.rca.insert_one({
+        "timestamp": datetime.utcnow(),
+        "anomaly_id": anomaly_id,
+        "metric": anomaly["metric"],
+        "instance": anomaly.get("instance", "unknown"),
+        "summary": analysis.get("summary"),
+        "simplified": analysis.get("simplified"),
+        "cause": analysis.get("cause"),
+        "fix": analysis.get("fix")
+    })
+
+    # Send email
+    body = f"""
+    <h2>{sev} Anomaly</h2>
+    <p><b>Metric:</b> {anomaly['metric']}</p>
+    <p><b>Value:</b> {anomaly['value']}</p>
+    <p><b>Reason:</b> {anomaly['reason']}</p>
+    """
+
+    send_alert(f"[{sev}] {anomaly['metric']}", body)
+
+
 # ============ MONITOR LOOP ============
 async def monitor():
     logger.info("[Monitor] Starting monitor loop...")
@@ -568,14 +645,12 @@ async def monitor():
 
     while True:
         ts = datetime.now().strftime("%H:%M:%S")
-        
-        # Start monitoring session tracking
         session = MonitoringSession(ts)
 
         try:
             db = get_db()
 
-            # 1. Fetch metrics from all targets
+            # 1. Fetch metrics
             metrics = await fetch_metrics()
             if not metrics:
                 logger.info(f"[{ts}] No metrics from Prometheus")
@@ -585,31 +660,24 @@ async def monitor():
 
             logger.info(f"[{ts}] Fetched {len(metrics)} metrics")
 
-            # 2. Save metrics to MongoDB
+            # 2. Save metrics
             if db is not None:
-                try:
-                    await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: db.metrics.insert_one({
-                            "timestamp": datetime.utcnow(),
-                            "count": len(metrics),
-                            "data": metrics[:50]
-                        })
-                    )
-                    logger.info(f"[{ts}] Saved metrics to MongoDB")
-                except Exception as e:
-                    logger.error(f"[{ts}] MongoDB save error: {e}")
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: db.metrics.insert_one({
+                        "timestamp": datetime.utcnow(),
+                        "count": len(metrics),
+                        "data": metrics[:50]
+                    })
+                )
 
-            # Cleanup old documents
+            # 3. Cleanup
             if db is not None:
-                try:
-                    await asyncio.get_event_loop().run_in_executor(None, lambda: cleanup_collection(db, "metrics"))
-                    await asyncio.get_event_loop().run_in_executor(None, lambda: cleanup_collection(db, "anomalies"))
-                    await asyncio.get_event_loop().run_in_executor(None, lambda: cleanup_collection(db, "rca"))
-                except Exception as e:
-                    logger.error(f"[{ts}] Cleanup error: {e}")
+                await asyncio.get_running_loop().run_in_executor(None, lambda: cleanup_collection(db, "metrics"))
+                await asyncio.get_running_loop().run_in_executor(None, lambda: cleanup_collection(db, "anomalies"))
+                await asyncio.get_running_loop().run_in_executor(None, lambda: cleanup_collection(db, "rca"))
 
-            # 3. Detect anomalies
+            # 4. Detect anomalies
             anomalies = detect_anomalies(metrics)
 
             if not anomalies:
@@ -618,7 +686,7 @@ async def monitor():
                 await asyncio.sleep(MONITOR_INTERVAL)
                 continue
 
-            # Deduplicate
+            # 5. Deduplicate + cap
             seen = set()
             unique_anomalies = []
             for a in anomalies:
@@ -627,70 +695,26 @@ async def monitor():
                     unique_anomalies.append(a)
             anomalies = unique_anomalies[:3]
 
-            # 4. Process each anomaly
-            for anomaly in anomalies:
-                sev = anomaly["severity"].upper()
-                logger.error(f"[{ts}] ANOMALY [{sev}]: {anomaly['metric']}={anomaly['value']} - {anomaly['reason']}")
+            # 6. MULTITHREADED anomaly processing
+            loop = asyncio.get_running_loop()
+            tasks = [
+                loop.run_in_executor(
+                    anomaly_executor,
+                    process_single_anomaly,
+                    anomaly,
+                    metrics
+                )
+                for anomaly in anomalies
+            ]
 
-                # 5. Save anomaly to MongoDB
-                anomaly_id = None
-                if db is not None:
-                    try:
-                        result = await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            lambda: db.anomalies.insert_one({
-                                "timestamp": datetime.utcnow(),
-                                "metric": anomaly["metric"],
-                                "value": anomaly["value"],
-                                "instance": anomaly.get("instance", "unknown"),
-                                "severity": anomaly["severity"],
-                                "reason": anomaly["reason"]
-                            })
-                        )
-                        anomaly_id = result.inserted_id
-                    except Exception as e:
-                        logger.error(f"[{ts}] Anomaly save error: {e}")
+            await asyncio.gather(*tasks)
 
-                # 6. Get LLM analysis with Langfuse tracking
-                analysis = await get_llm_analysis(anomaly, metrics, str(anomaly_id) if anomaly_id else "unknown")
-                logger.info(f"[{ts}] RCA: {analysis.get('cause')} | Fix: {analysis.get('fix')}")
-
-                # 7. Save RCA to MongoDB
-                if db is not None and anomaly_id is not None:
-                    try:
-                        await asyncio.get_event_loop().run_in_executor(
-                            None,
-                            lambda: db.rca.insert_one({
-                                "timestamp": datetime.utcnow(),
-                                "anomaly_id": anomaly_id,
-                                "metric": anomaly["metric"],
-                                "instance": anomaly.get("instance", "unknown"),
-                                "summary": analysis.get("summary"),
-                                "simplified": analysis.get("simplified"),
-                                "cause": analysis.get("cause"),
-                                "fix": analysis.get("fix")
-                            })
-                        )
-                    except Exception as e:
-                        logger.error(f"[{ts}] RCA save error: {e}")
-
-                # 8. Send email
-                body = f"""
-                <h2>{sev} Anomaly</h2>
-                <p><b>Metric:</b> {anomaly['metric']}</p>
-                <p><b>Instance:</b> {anomaly.get('instance', 'unknown')}</p>
-                <p><b>Value:</b> {anomaly['value']}</p>
-                <p><b>Reason:</b> {anomaly['reason']}</p>
-                <h3>RCA</h3>
-                <p><b>Summary:</b> {analysis.get('summary')}</p>
-                <p><b>Cause:</b> {analysis.get('cause')}</p>
-                <p><b>Fix:</b> {analysis.get('fix')}</p>
-                """
-                if send_alert(f"[{sev}] {anomaly['metric']}", body):
-                    logger.info(f"[{ts}] Email sent")
-            
-            # End session successfully
-            session.end(metrics_count=len(metrics), anomalies_count=len(anomalies), success=True)
+            # 7. End monitoring session
+            session.end(
+                metrics_count=len(metrics),
+                anomalies_count=len(anomalies),
+                success=True
+            )
 
         except Exception as e:
             logger.error(f"[{ts}] Monitor error: {e}")
@@ -701,9 +725,12 @@ async def monitor():
 # ============ FASTAPI ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global MAIN_EVENT_LOOP
+    MAIN_EVENT_LOOP = asyncio.get_running_loop()
+
     logger.info(f"Monitor started | Prometheus: {PROM_URL} | LLM: {LLM_MODEL}")
     logger.info(f"MongoDB URI: {MONGO_URI[:30] if MONGO_URI else 'NOT SET'}...")
-    status_msg = "✅ Enabled (v3)" if LANGFUSE_ENABLED else "❌ Disabled"
+    status_msg = " Enabled (v3)" if LANGFUSE_ENABLED else " Disabled"
     if not LANGFUSE_ENABLED:
         status_msg += f" (Module: {LANGFUSE_AVAILABLE}, PK: {bool(LANGFUSE_PUBLIC_KEY)}, SK: {bool(LANGFUSE_SECRET_KEY)})"
     logger.info(f"Langfuse: {status_msg}")
@@ -726,11 +753,14 @@ async def lifespan(app: FastAPI):
         try:
             logger.info("[Langfuse] Flushing remaining data...")
             langfuse.flush()
-            logger.info("[Langfuse] ✅ Flush complete")
+            logger.info("[Langfuse]  Flush complete")
         except Exception as e:
             logger.warning(f"[Langfuse] Flush error: {e}")
     
     task.cancel()
+    anomaly_executor.shutdown(wait=False)
+
+
 
 app = FastAPI(title="AI DevOps Monitor", lifespan=lifespan)
 app.add_middleware(
@@ -826,7 +856,7 @@ User asks: {message.message}
 Provide a helpful, concise answer. Explain technical concepts simply if asked."""
 
     # Call LLM
-    response = await asyncio.get_event_loop().run_in_executor(
+    response = await asyncio.get_running_loop().run_in_executor(
         None,
         ask_llm,
         prompt,

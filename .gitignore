@@ -51,4 +51,7 @@ data/
 *.log
 
 # Local config
-config.env
+config.py
+
+frontend/
+
