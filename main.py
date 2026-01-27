@@ -83,33 +83,10 @@ from pydantic import BaseModel
 
 
 # ============ LANGFUSE v3.12+ CONFIGURATION ============
-LANGFUSE_AVAILABLE = False
+from langfuse import Langfuse, get_client, propagate_attributes, observe
+
+LANGFUSE_AVAILABLE = True
 langfuse = None
-propagate_attributes = None
-observe = None
-
-try:
-    from langfuse import Langfuse, get_client, propagate_attributes as _propagate_attributes, observe as _observe
-    LANGFUSE_AVAILABLE = True
-    propagate_attributes = _propagate_attributes
-    observe = _observe
-    logger.info("[Langfuse] v3 SDK imported successfully")
-except ImportError:
-    logger.warning("[Langfuse] Package not installed. Run: pip install langfuse --break-system-packages")
-
-    def propagate_attributes(**kwargs):
-        from contextlib import contextmanager
-        @contextmanager
-        def dummy_context():
-            yield
-        return dummy_context()
-
-    def observe(*args, **kwargs):
-        def decorator(func):
-            return func
-        if len(args) == 1 and callable(args[0]):
-            return args[0]
-        return decorator
 
 
 from config import (
@@ -303,7 +280,7 @@ def cleanup_collection(db, collection: str):
             logger.info(f"[cleanup] Removed {len(old)} old docs from {collection}")
 
 
-# ============ SLACK (ENV ONLY) ============
+# ============ SLACK ============
 def _mask_webhook(url: str) -> str:
     if not url:
         return ""
@@ -344,7 +321,7 @@ def send_slack_alert_text(text: str) -> bool:
         return False
 
 
-# ============ LLM WITH LANGFUSE v3.12+ & SESSION SUPPORT ============
+# ============ LLM WITH LANGFUSE & SESSION SUPPORT ============
 def ask_llm(
     prompt: str,
     trace_name: str = "LLM Call",
