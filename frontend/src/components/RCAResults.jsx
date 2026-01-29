@@ -80,7 +80,7 @@ export default function RCAResults() {
         </div>
       ) : rcaResults.length === 0 ? (
         <div className="bg-white rounded-xl p-12 shadow-sm text-center border border-gray-200">
-          <div className="text-6xl mb-4">#</div>
+          <div className="text-6xl mb-4">🔍</div>
           <p className="text-gray-500 text-lg">No RCA results available</p>
           <p className="text-gray-400 text-sm mt-2">
             RCA reports will appear here once anomalies are analyzed
@@ -98,7 +98,7 @@ export default function RCAResults() {
                 <div className="flex-1">
                   <div className="flex items-center space-x-3 mb-2">
                     <span className="text-2xl">🔍</span>
-                    <h3 className="text-xl font-bold text-gray-800">{rca.metric}</h3>
+                    <h3 className="text-xl font-bold text-gray-800">{rca.metric || "Batch Analysis"}</h3>
                   </div>
                   {rca.instance && (
                     <p className="text-sm text-gray-500 mb-2">Instance: {rca.instance}</p>
@@ -110,10 +110,6 @@ export default function RCAResults() {
                   )}
                 </div>
                 <div className="text-right">
-                  <p className="text-xs text-gray-500">Analyzed</p>
-                  <p className="text-sm font-medium text-gray-700">
-                    {new Date(rca.timestamp).toLocaleString()}
-                  </p>
                   <button
                     onClick={() => openChat(rca)}
                     className="mt-2 text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center justify-end gap-1"
@@ -123,28 +119,18 @@ export default function RCAResults() {
                 </div>
               </div>
 
-              {/* SIMPLIFIED EXPLANATION (New) */}
-              <div className="mb-4">
-                <div className="flex items-center space-x-2 mb-3">
-                  <span className="text-2xl">🎓</span>
-                  <h4 className="text-sm font-bold text-gray-700 uppercase tracking-wide">What does this mean? (Simple)</h4>
-                </div>
-                <div className="bg-blue-50 border-l-4 border-blue-400 rounded-lg p-4">
-                  <p className="text-gray-800 leading-relaxed font-medium">
-                    {rca.simplified || "AI is generating a simplified explanation..."}
-                  </p>
-                  {!rca.simplified && <p className="text-xs text-gray-500 mt-1">(Only available for new anomalies)</p>}
-                </div>
-              </div>
-
               {/* Root Cause */}
               <div className="mb-4">
                 <div className="flex items-center space-x-2 mb-3">
-                  <span className="text-2xl">🔍</span>
-                  <h4 className="text-sm font-bold text-gray-700 uppercase tracking-wide">Technical Root Cause</h4>
+                  <span className="text-2xl">🔬</span>
+                  <h4 className="text-sm font-bold text-gray-700 uppercase tracking-wide">
+                    Technical Root Cause
+                  </h4>
                 </div>
                 <div className="bg-purple-50 border-l-4 border-purple-500 rounded-lg p-4">
-                  <p className="text-gray-800 leading-relaxed font-mono text-sm">{rca.cause || 'Analysis in progress...'}</p>
+                  <p className="text-gray-800 leading-relaxed">
+                    {rca.cause || 'Analysis in progress...'}
+                  </p>
                 </div>
               </div>
 
@@ -152,10 +138,14 @@ export default function RCAResults() {
               <div className="mb-4">
                 <div className="flex items-center space-x-2 mb-3">
                   <span className="text-2xl">💡</span>
-                  <h4 className="text-sm font-bold text-gray-700 uppercase tracking-wide">Recommended Action</h4>
+                  <h4 className="text-sm font-bold text-gray-700 uppercase tracking-wide">
+                    Recommended Action
+                  </h4>
                 </div>
                 <div className="bg-green-50 border-l-4 border-green-500 rounded-lg p-4">
-                  <p className="text-gray-800 font-medium leading-relaxed">{rca.fix || 'Recommendations pending...'}</p>
+                  <p className="text-gray-800 font-medium leading-relaxed">
+                    {Array.isArray(rca.fix) ? rca.fix.join(', ') : (rca.fix || 'Recommendations pending...')}
+                  </p>
                 </div>
               </div>
 
@@ -187,12 +177,16 @@ export default function RCAResults() {
 
 function ChatModal({ rca, onClose }) {
   const [messages, setMessages] = useState([
-    { role: 'ai', text: `Hi! I analyzed the ${rca.metric} anomaly. How can I help you understand it better?` }
+    { 
+      role: 'ai', 
+      text: `Hi! I analyzed the ${rca.metric} anomaly. How can I help you understand it better?` 
+    }
   ]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [sessionId, setSessionId] = useState(null);
 
-  // Scroll to bottom
+  // Scroll to bottom on new messages
   useEffect(() => {
     const el = document.getElementById('chat-box');
     if (el) el.scrollTop = el.scrollHeight;
@@ -208,27 +202,39 @@ function ChatModal({ rca, onClose }) {
     setSending(true);
 
     try {
-        // Construct context for the chat
+        // Construct context for the chat - matches main.py ChatMessage model
         const context = {
             metric: rca.metric,
-            value: rca.value, // Note: value might not be directly on RCA object depending on backend response, check main.py
+            instance: rca.instance,
             cause: rca.cause,
             fix: rca.fix,
-            simplified: rca.simplified
+            summary: rca.summary
         };
         
-        // Use the existing chat endpoint
+        // Add simplified if available
+        if (rca.simplified) {
+            context.simplified = rca.simplified;
+        }
+        
+        // Call chat API with proper structure
         const res = await api.chat({
             message: userMsg,
-            context: {
-                ...context,
-                type: "rca_discussion" 
-            }
+            context: context,
+            session_id: sessionId  // Continue conversation in same session
         });
+        
+        // Store session ID for conversation continuity
+        if (res.session_id) {
+            setSessionId(res.session_id);
+        }
         
         setMessages(prev => [...prev, { role: 'ai', text: res.response }]);
     } catch (err) {
-        setMessages(prev => [...prev, { role: 'ai', text: "Sorry, I encountered an error. Please try again." }]);
+        console.error('Chat error:', err);
+        setMessages(prev => [...prev, { 
+            role: 'ai', 
+            text: "Sorry, I encountered an error. Please try again." 
+        }]);
     } finally {
         setSending(false);
     }
@@ -242,25 +248,36 @@ function ChatModal({ rca, onClose }) {
                 <h3 className="font-bold text-gray-800">AI Assistant</h3>
                 <p className="text-xs text-gray-500">Discussing {rca.metric}</p>
             </div>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
+            <button 
+              onClick={onClose} 
+              className="text-gray-400 hover:text-gray-600 text-xl font-bold"
+            >
+              ×
+            </button>
         </div>
         
-        <div id="chat-box" className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
+        <div 
+          id="chat-box" 
+          className="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50"
+        >
             {messages.map((m, i) => (
-                <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div 
+                  key={i} 
+                  className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
                     <div className={`max-w-[80%] rounded-lg p-3 ${
                         m.role === 'user' 
                             ? 'bg-blue-600 text-white rounded-br-none' 
                             : 'bg-white border border-gray-200 text-gray-800 rounded-bl-none shadow-sm'
                     }`}>
-                        <p className="text-sm">{m.text}</p>
+                        <p className="text-sm whitespace-pre-wrap">{m.text}</p>
                     </div>
                 </div>
             ))}
             {sending && (
                 <div className="flex justify-start">
                     <div className="bg-gray-200 rounded-lg p-3 animate-pulse">
-                        <span className="text-xs text-gray-500">Thinking...</span>
+                        <span className="text-xs text-gray-500">AI is thinking...</span>
                     </div>
                 </div>
             )}
@@ -271,14 +288,15 @@ function ChatModal({ rca, onClose }) {
                 <input
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
-                    placeholder="Ask a question..."
+                    placeholder="Ask a question about this anomaly..."
                     className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     disabled={sending}
+                    autoFocus
                 />
                 <button 
                     type="submit" 
                     disabled={sending || !input.trim()}
-                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 font-medium"
+                    className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium transition-colors"
                 >
                     Send
                 </button>

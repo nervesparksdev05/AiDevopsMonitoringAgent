@@ -1,17 +1,21 @@
 global:
-  scrape_interval: 5s       # Scrape every 5 seconds (faster detection)
-  scrape_timeout: 5s        # Timeout for scraping
-  evaluation_interval: 15s  # Evaluate rules every 15s
+  scrape_interval: 5s
+  scrape_timeout: 5s
+  evaluation_interval: 15s
 
 scrape_configs:
-  # FastAPI Backend API - YOUR MAIN SERVICE
-  - job_name: "fastapi-backend"
-    metrics_path: /metrics
+  # Your FastAPI app (self-monitoring)
+  - job_name: "fastapi"
     static_configs:
-      - targets: ["host.docker.internal:8000"]  # ✅ Use host.docker.internal for Docker on Windows
+      - targets: ["localhost:8000"]
         labels:
-          app: "fastapi"
-          service: "backend-api"
-          env: "development"
+          app: "ai-devops-monitor"
+          env: "production"
 
- 
+  # Dynamic targets from UI
+  - job_name: "dynamic-targets"
+    file_sd_configs:
+      - files:
+          - "targets.json"
+        refresh_interval: 30s
+

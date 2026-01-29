@@ -1,0 +1,11 @@
+[
+  {
+    "targets": [
+      "127.0.0.1:8000"
+    ],
+    "labels": {
+      "job": "dynamic-targets",
+      "name": "backend server"
+    }
+  }
+]

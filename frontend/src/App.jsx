@@ -4,6 +4,7 @@ import Dashboard from "./components/Dashboard";
 import Anomalies from "./components/Anomalies";
 import RCAResults from "./components/RCAResults";
 import EmailSettings from "./components/EmailSettings";
+import ServerSettings from "./components/ServerSettings";
 
 function App() {
   const navItems = [
@@ -12,8 +13,10 @@ function App() {
     { path: "/rca", name: "RCA Results", icon: "🔍" },
   ];
 
-  // Backend supports alert rules (not email-config endpoints)
-  const settingsItems = [{ path: "/settings/alert-rules", name: "Alert Rules", icon: "⚙️" }];
+  const settingsItems = [
+    { path: "/settings/servers", name: "Alerts & Servers", icon: "⚙️" },
+    { path: "/settings/email", name: "Email Config", icon: "📧" } 
+  ];
 
   return (
     <Router>
@@ -94,7 +97,8 @@ function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/anomalies" element={<Anomalies />} />
               <Route path="/rca" element={<RCAResults />} />
-              <Route path="/settings/alert-rules" element={<EmailSettings />} />
+              <Route path="/settings/servers" element={<ServerSettings />} />
+              <Route path="/settings/email" element={<EmailSettings />} />
             </Routes>
           </div>
         </main>
