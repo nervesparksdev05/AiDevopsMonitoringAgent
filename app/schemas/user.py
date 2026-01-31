@@ -1,0 +1,49 @@
+"""
+User Authentication Schemas
+"""
+from typing import Optional
+from pydantic import BaseModel, EmailStr, Field
+
+
+class UserRegister(BaseModel):
+    """User registration request"""
+    username: str = Field(..., min_length=3, max_length=50)
+    email: EmailStr
+    password: str = Field(..., min_length=6)
+
+
+class UserLogin(BaseModel):
+    """User login request"""
+    username: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    """User response (no password)"""
+    id: str
+    username: str
+    email: str
+    active: bool = True
+    
+    class Config:
+        from_attributes = True
+
+
+class Token(BaseModel):
+    """JWT token response"""
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenData(BaseModel):
+    """Token payload data"""
+    user_id: Optional[str] = None
+    username: Optional[str] = None
+
+
+class User(BaseModel):
+    """User model for dependency injection"""
+    id: str
+    username: str
+    email: str
+    active: bool = True

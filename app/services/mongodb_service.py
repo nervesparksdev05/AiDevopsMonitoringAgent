@@ -1,72 +1,135 @@
 """
-MongoDB Service
-Database connection and operations
+db.py (MongoDB Service + Helpers)
+- Optimized MongoDB connection reuse + ping health check
+- Helpers to standardize instance/ip/port parsing and source object
+- Validator to ensure only real Prometheus instance labels are treated as instance
 """
+
 from __future__ import annotations
 
+import re
+from typing import Any, Dict, Optional, Tuple
+
 from pymongo import MongoClient
-from app.core.config import MONGO_URI, DB_NAME, MAX_DOCS
+from pymongo.errors import PyMongoError
+
+from app.core.config import MONGO_URI, DB_NAME
 from app.core.logging import logger
 
-
-_mongo_client = None
-_db_connected = False
+_mongo_client: Optional[MongoClient] = None
+_db_connected: bool = False
 
 
 def get_db():
-    """Get MongoDB database connection"""
+    """Get MongoDB database connection (cached)."""
     global _mongo_client, _db_connected
-    try:
-        uri = (MONGO_URI or "").strip()
-        if not uri:
-            logger.error("[MongoDB Error] MONGO_URI not set")
-            return None
 
+    uri = (MONGO_URI or "").strip()
+    if not uri:
+        logger.error("[MongoDB Error] MONGO_URI not set")
+        return None
+
+    try:
         if _mongo_client is None:
             logger.info("[MongoDB] Connecting...")
             _mongo_client = MongoClient(
                 uri,
                 serverSelectionTimeoutMS=2000,
                 connectTimeoutMS=2000,
-                socketTimeoutMS=2000,
-                maxPoolSize=5,
+                socketTimeoutMS=5000,
+                maxPoolSize=10,
+                minPoolSize=1,
+                retryWrites=True,
             )
             _db_connected = False
 
         if not _db_connected:
-            _mongo_client[DB_NAME].list_collection_names()
+            _mongo_client.admin.command("ping")
             _db_connected = True
             logger.info("[MongoDB] Connected!")
 
         return _mongo_client[DB_NAME]
-    except Exception as e:
+
+    except PyMongoError as e:
         logger.error(f"[MongoDB Error] {e}")
-        _mongo_client = None
-        _db_connected = False
-        return None
-
-
-def _pick_sort_field(sample: dict) -> str:
-    """Pick a reasonable timestamp field for cleanup ordering."""
-    for f in ("timestamp", "created_at", "collected_at", "last_activity", "window_end"):
-        if f in sample:
-            return f
-    return "_id"
-
-
-def cleanup_collection(db, collection: str, sort_field: str | None = None):
-    """Remove old documents from a collection to maintain size limit (MAX_DOCS)."""
-    try:
-        count = db[collection].count_documents({})
-        if count <= MAX_DOCS:
-            return
-
-        sample = db[collection].find_one({})
-        sf = sort_field or (_pick_sort_field(sample or {}))
-        remove_n = max(0, count - MAX_DOCS)
-        old = list(db[collection].find().sort(sf, 1).limit(remove_n))
-        if old:
-            db[collection].delete_many({"_id": {"$in": [d["_id"] for d in old]}})
-            logger.info(f"[cleanup] Removed {len(old)} old docs from {collection}")
     except Exception as e:
-        logger.error(f"[cleanup] Error cleaning {collection}: {e}")
+        logger.error(f"[MongoDB Error] Unexpected: {e}")
+
+    _mongo_client = None
+    _db_connected = False
+    return None
+
+
+def parse_instance(instance: str) -> Tuple[str, Optional[int]]:
+    """
+    Parse:
+      - 'ip:port' / 'host:port' -> ('ip_or_host', port)
+      - '[::1]:9182' -> ('::1', 9182)
+      - 'host' -> ('host', None)
+    Returns (host_or_ip, port|None)
+    """
+    if not instance:
+        return ("unknown", None)
+
+    inst = instance.strip()
+
+    # IPv6 bracket format: [::1]:9182
+    if inst.startswith("[") and "]" in inst:
+        host = inst.split("]")[0].lstrip("[")
+        rest = inst.split("]")[1]
+        if rest.startswith(":"):
+            try:
+                return (host, int(rest[1:]))
+            except Exception:
+                return (host, None)
+        return (host, None)
+
+    # host:port
+    if ":" in inst:
+        host, port_str = inst.rsplit(":", 1)
+        try:
+            return (host, int(port_str))
+        except Exception:
+            return (host, None)
+
+    return (inst, None)
+
+
+def build_source(
+    *,
+    instance: Optional[str] = None,
+    job: Optional[str] = None,
+    labels: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Consistent source object to store in every collection."""
+    inst = (instance or "unknown").strip()
+    ip, port = parse_instance(inst)
+
+    src: Dict[str, Any] = {"instance": inst, "ip": ip}
+    if port is not None:
+        src["port"] = port
+    if job:
+        src["job"] = job
+    if labels:
+        src["labels"] = labels
+    return src
+
+
+# Accept only real targets for "instance" (ip:port / host:port / ipv6 forms)
+_INSTANCE_RE = re.compile(
+    r"""
+    ^(
+        \[[0-9a-fA-F:]+\](:\d+)? |          # [::1]:9182
+        [A-Za-z0-9\.\-]+:\d+ |              # host:port
+        \d{1,3}(\.\d{1,3}){3}(:\d+)?         # ipv4[:port]
+    )$
+    """,
+    re.VERBOSE,
+)
+
+
+def looks_like_instance(value: Optional[str]) -> bool:
+    """Return True if value looks like a Prometheus instance label."""
+    if not value:
+        return False
+    return bool(_INSTANCE_RE.match(value.strip()))

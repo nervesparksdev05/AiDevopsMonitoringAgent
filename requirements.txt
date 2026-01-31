@@ -6,4 +6,8 @@ fastapi>=0.100.0
 uvicorn>=0.23.0
 prometheus-fastapi-instrumentator>=7.0.0
 httpx>=0.24.0
-langfuse==3.12.0
+langfuse
+PyJWT
+argon2-cffi
+email-validator
+python-multipart>=2.0.0

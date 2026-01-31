@@ -10,13 +10,15 @@ from app.services.mongodb_service import get_db
 from app.core.logging import logger
 
 
-def send_alert(subject: str, body: str) -> bool:
-    """Send email alert to configured recipients"""
+def send_alert(subject: str, body: str, user_id: str = None) -> bool:
+    """Send email alert to configured recipients for specific user"""
     db = get_db()
     if db is None:
         return False
 
-    config = db.email_config.find_one({})
+    # Query user-specific config if user_id provided
+    query = {"user_id": user_id} if user_id else {}
+    config = db.email_config.find_one(query)
     if not config or not config.get("enabled"):
         return False
 

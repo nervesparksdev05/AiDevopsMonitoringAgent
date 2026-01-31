@@ -1,27 +1,31 @@
-# AI DevOps Monitor
+# AI DevOps Monitoring Platform
 
-**Intelligent infrastructure monitoring with AI-powered root cause analysis**
+**Multi-user intelligent infrastructure monitoring with AI-powered root cause analysis**
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-6.0+-success.svg)](https://www.mongodb.com/)
+[![React](https://img.shields.io/badge/React-18+-61DAFB.svg)](https://reactjs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> Real-time monitoring with LLM-powered anomaly detection, batch analysis, and intelligent alerting
+> Production-ready SaaS platform for real-time monitoring with LLM-powered anomaly detection, batch analysis, and intelligent alerting
 
 ---
 
 ## 🎯 Overview
 
-AI DevOps Monitor collects Prometheus metrics and uses LLM (Large Language Model) to detect anomalies, identify root causes, and provide actionable remediation steps. Built for production with FastAPI, MongoDB, and comprehensive observability.
+AI DevOps Monitor is a complete multi-user monitoring platform that collects Prometheus metrics and uses Large Language Models (LLM) to detect anomalies, identify root causes, and provide actionable remediation steps. Each user has their own isolated workspace with custom monitoring targets and notification settings.
 
-### Key Features
+### ✨ Key Features
 
-- **🤖 100% LLM-Powered** - AI detects anomalies from raw metrics (no threshold rules)
+- **👥 Multi-User Architecture** - Complete user isolation with JWT authentication
+- **🤖 100% LLM-Powered Detection** - AI detects anomalies from raw metrics (no threshold rules)
 - **📊 Batch Analysis** - Analyzes entire metric batches for holistic incident detection
-- **🔔 Multi-Channel Alerts** - Email and Slack notifications with rich formatting
+- **🎯 Dynamic Target Management** - Add/remove monitoring targets via UI
+- **🔔 User-Specific Alerts** - Email and Slack notifications per user
 - **💾 Full Observability** - MongoDB storage with Langfuse LLM tracking
 - **⚡ Production Ready** - Async operations, IST timezone support, comprehensive error handling
+- **🎨 Modern UI** - Beautiful React frontend with real-time updates
 
 ---
 
@@ -29,141 +33,330 @@ AI DevOps Monitor collects Prometheus metrics and uses LLM (Large Language Model
 
 ### Prerequisites
 
-- Python 3.10+
-- MongoDB 6.0+
-- Prometheus
-- Ollama (or compatible LLM)
+- **Python 3.10+**
+- **Node.js 18+** (for frontend)
+- **MongoDB 6.0+**
+- **Prometheus** (with Docker or standalone)
+- **LLM Provider** (OpenAI or Ollama)
 
-### Installation
+### 1. Backend Setup
 
 ```bash
-# Clone and setup
+# Clone repository
 git clone https://github.com/yourusername/ai-devops-monitor.git
 cd ai-devops-monitor
+
+# Create virtual environment
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
 
-# Configure
+# Configure environment
 cp .env.example .env
-# Edit .env with your settings
-
-# Start
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+# Edit .env with your settings (see Configuration section)
 ```
 
-Visit `http://localhost:8000/docs` for API documentation.
+### 2. Frontend Setup
+
+```bash
+cd frontend
+npm install
+```
+
+### 3. Start Prometheus
+
+```bash
+# Using Docker Compose (recommended)
+docker-compose up -d
+
+# Or start standalone Prometheus with prometheus.yml
+```
+
+### 4. Run the Application
+
+```bash
+# Terminal 1: Backend
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 2: Frontend
+cd frontend
+npm run dev
+```
+
+### 5. Access the Application
+
+- **Frontend:** http://localhost:5173
+- **Backend API:** http://localhost:8000/docs
+- **Prometheus:** http://localhost:9090
 
 ---
 
 ## ⚙️ Configuration
 
-### Environment Variables
+### Environment Variables (.env)
 
 ```env
-# Core Services
+# ============================================
+# CORE SERVICES
+# ============================================
 PROM_URL=http://localhost:9090
 MONGO_URI=mongodb://localhost:27017
-LLM_URL=http://localhost:11434
-LLM_MODEL=llama3.2
+BATCH_INTERVAL_MINUTES=1
 
-# Monitoring Settings
-BATCH_INTERVAL_MINUTES=1          # Analysis frequency
-BATCH_MAX_METRICS=600            # Max metrics per prompt
+# ============================================
+# LLM PROVIDER (Choose one)
+# ============================================
 
-# Email Alerts (Optional)
+# Option 1: OpenAI (Recommended for production)
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
+
+# Option 2: Ollama (Free, local)
+# LLM_PROVIDER=ollama
+# LLM_URL=http://localhost:11434
+# LLM_MODEL=llama3.2
+
+# ============================================
+# AUTHENTICATION
+# ============================================
+JWT_SECRET_KEY=your-secret-key-here-change-in-production
+JWT_ALGORITHM=HS256
+JWT_EXPIRE_MINUTES=1440
+
+# ============================================
+# EMAIL ALERTS (Optional, per-user config)
+# ============================================
 SMTP_HOST=smtp.gmail.com
 SMTP_PORT=587
 SMTP_USER=your-email@gmail.com
-SMTP_PASSWORD=your-app-password  # Gmail: Use App Password
+SMTP_PASSWORD=your-app-password
 
-# Slack Alerts (Optional)
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK
+# ============================================
+# SLACK ALERTS (Optional, per-user config)
+# ============================================
+# Users configure their own webhooks in UI
 
-# Langfuse Tracking (Optional)
+# ============================================
+# LANGFUSE TRACKING (Optional)
+# ============================================
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...
 LANGFUSE_HOST=https://cloud.langfuse.com
 ```
 
-**Gmail App Password Setup:**
-1. Enable 2-Step Verification at https://myaccount.google.com/security
-2. Generate App Password at https://myaccount.google.com/apppasswords
+### Gmail App Password Setup
+
+1. Enable 2-Step Verification: https://myaccount.google.com/security
+2. Generate App Password: https://myaccount.google.com/apppasswords
 3. Use the 16-character password in `SMTP_PASSWORD`
 
-**Slack Webhook Setup:**
-1. Create app at https://api.slack.com/apps
-2. Enable Incoming Webhooks
-3. Add webhook to workspace and copy URL
+### Prometheus Configuration
+
+The system uses **file-based service discovery** for dynamic targets:
+
+**prometheus.yml:**
+```yaml
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: "dynamic-targets"
+    file_sd_configs:
+      - files:
+          - "/etc/prometheus/targets.json"
+        refresh_interval: 30s
+```
+
+**targets.json** (auto-managed by UI):
+```json
+[
+  {
+    "targets": ["192.168.1.4:9182"],
+    "labels": {
+      "job": "dynamic-targets",
+      "name": "server",
+      "user_id": "697db48e10965d8fb0ff3bb7"
+    }
+  }
+]
+```
+
+**docker-compose.yml:**
+```yaml
+version: '3.8'
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./targets.json:/etc/prometheus/targets.json
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+```
 
 ---
 
 ## 🏗️ Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                  AI DevOps Monitor                      │
-│                                                         │
-│  Prometheus ──▶ FastAPI ──▶ LLM ──▶ MongoDB           │
-│      ↓            │           │         │              │
-│   Metrics      Batch       RCA     Storage             │
-│                Analysis                                 │
-│                   │                                     │
-│                   └──▶ Alerts (Email + Slack)          │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Batch Monitoring Flow
+### System Overview
 
 ```
-Every 1 minute:
-1. Fetch metrics from Prometheus (self-monitoring + targets)
+┌──────────────────────────────────────────────────────────────┐
+│                  AI DevOps Monitor (Multi-User)              │
+│                                                              │
+│  React UI ──▶ FastAPI ──▶ MongoDB (User Isolation)         │
+│      │           │                                           │
+│   Register    JWT Auth                                       │
+│   Login       Protected                                      │
+│   Dashboard   Endpoints                                      │
+│                │                                             │
+│  Prometheus ──▶│──▶ LLM ──▶ Anomalies ──▶ Email/Slack      │
+│   (per user)   │    AI       (per user)     (per user)      │
+│                │                                             │
+│  Targets ──────┘                                             │
+│  (user_id)                                                   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Multi-User Data Isolation
+
+Every data collection is filtered by `user_id`:
+
+```python
+# All queries include user filter
+user_filter = {"user_id": user.id}
+
+# Examples:
+db.metrics_batches.find(user_filter)
+db.anomalies.find(user_filter)
+db.targets.find(user_filter)
+db.email_config.find_one(user_filter)
+```
+
+### Batch Monitoring Flow (Per User)
+
+```
+Every 1 minute (per user):
+1. Fetch metrics from Prometheus filtered by user_id label
 2. Group by instance and build LLM prompt
 3. LLM analyzes batch and detects anomalies
-4. Store: batch → incident → anomalies → RCA
-5. Send alerts (Email + Slack) if incidents detected
+4. Store: batch → incident → anomalies → RCA (all with user_id)
+5. Send alerts using user's email/Slack config
 6. Track with Langfuse for observability
 ```
 
 ---
 
-## 📚 API Endpoints
+## 📱 User Guide
 
-### Core
+### Getting Started
+
+1. **Register Account**
+   - Visit http://localhost:5173
+   - Click "Register"
+   - Create username, email, and password
+   - Auto-login after registration
+
+2. **Add Monitoring Targets**
+   - Go to Settings → Alerts & Servers
+   - Click "Add Server"
+   - Enter server IP and port (e.g., `192.168.1.4:9182`)
+   - Give it a name
+   - Click Save
+
+3. **Configure Notifications**
+   - **Email:** Settings → Email Config
+     - Toggle "Enable Email Alerts"
+     - Add recipient emails
+     - Click "Test Email" to verify
+   
+   - **Slack:** Settings → Alerts & Servers
+     - Enter Slack Webhook URL
+     - Toggle "Enable Slack Alerts"
+     - Click "Test Slack" to verify
+
+4. **View Monitoring Data**
+   - **Dashboard:** System overview and stats
+   - **Metrics:** View all collected metric batches
+   - **Anomalies:** AI-detected issues
+   - **RCA Results:** Root cause analyses
+
+### Adding Prometheus Targets
+
+The system supports **Windows Exporter**, **Node Exporter**, or any Prometheus-compatible exporter:
+
+**Windows Exporter:**
+```powershell
+# Download from https://github.com/prometheus-community/windows_exporter
+# Run installer or use Chocolatey
+choco install prometheus-windows-exporter.install
+
+# Default port: 9182
+# Add to UI: <your-ip>:9182
+```
+
+**Node Exporter (Linux):**
+```bash
+# Download from https://prometheus.io/download/#node_exporter
+wget https://github.com/prometheus/node_exporter/releases/download/v*/node_exporter-*-linux-amd64.tar.gz
+tar xvfz node_exporter-*-linux-amd64.tar.gz
+cd node_exporter-*
+./node_exporter
+
+# Default port: 9100
+# Add to UI: <your-ip>:9100
+```
+
+---
+
+## 📚 API Documentation
+
+### Authentication Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/api/auth/register` | POST | ❌ | Create new account |
+| `/api/auth/login` | POST | ❌ | Login and get JWT |
+| `/api/auth/me` | GET | ✅ | Get current user |
+
+### Data Endpoints (All require authentication)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | System status |
-| `/health` | GET | Health check with IST time |
-| `/stats` | GET | Collection statistics |
-| `/docs` | GET | Interactive API docs |
+| `/health` | GET | System health check |
+| `/stats` | GET | User's collection statistics |
+| `/batches` | GET | User's metrics batches |
+| `/anomalies` | GET | User's detected anomalies |
+| `/rca` | GET | User's root cause analyses |
+| `/incidents` | GET | User's detected incidents |
 
-### Data
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/anomalies` | GET | LLM-detected anomalies |
-| `/rca` | GET | Root cause analyses |
-| `/batches` | GET | Metrics batches |
-| `/incidents` | GET | Detected incidents |
-
-### Configuration
+### Configuration Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/agent/email-config` | GET/PUT | Email settings |
-| `/agent/slack-config` | GET/PUT | Slack settings |
-| `/agent/targets` | GET/POST | Prometheus targets |
+| `/agent/email-config` | GET/PUT | User's email settings |
+| `/agent/slack-config` | GET/PUT | User's Slack settings |
+| `/agent/targets` | GET/POST/DELETE | User's Prometheus targets |
 | `/agent/test-email` | POST | Send test email |
 | `/agent/test-slack` | POST | Send test Slack message |
 
-### AI Chat
+### Interactive API Docs
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/chat` | POST | Chat with AI about incidents |
-| `/api/sessions` | GET | List chat sessions |
-| `/api/sessions/{id}` | DELETE | Delete session |
+Visit http://localhost:8000/docs for full Swagger documentation with "Try it out" functionality.
 
 ---
 
@@ -173,13 +366,13 @@ Every 1 minute:
 
 The system uses **pure AI detection** - no threshold rules or statistical methods:
 
-1. **Fetch Metrics** - Queries Prometheus for all relevant metrics
+1. **Fetch Metrics** - Queries Prometheus for user's targets
 2. **Group by Instance** - Organizes metrics by server/service
 3. **Build Prompt** - Creates structured prompt with time window and ALL metrics
 4. **LLM Analysis** - AI analyzes the entire batch and decides what's anomalous
 5. **Parse Response** - Extracts incident, anomalies, clusters from JSON
-6. **Store Everything** - Saves to MongoDB for history
-7. **Send Alerts** - Notifies via Email/Slack if issues found
+6. **Store Everything** - Saves to MongoDB with user_id
+7. **Send Alerts** - Notifies via user's configured Email/Slack
 
 ### Why LLM-Only?
 
@@ -200,56 +393,27 @@ if cpu > 80%: alert("High CPU")  # Might be normal during deployments
 However, memory is also spiking unusually, suggesting a leak."
 ```
 
-### LLM Prompt Structure
-
-```
-You are an expert SRE analyzing Prometheus metrics.
-
-BATCH WINDOW (IST): 2026-01-29 03:15:00 IST -> 03:16:00 IST (1 min)
-
-TASKS:
-1. Detect anomalies (spikes, drops, errors, high resource usage)
-2. Cluster related anomalies by root cause
-3. Provide collective RCA with evidence
-4. Return ONLY valid JSON
-
-METRICS (16/16 included):
-
-### Instance: host.docker.internal:8000
-  http_requests_total: 130.0
-  http_request_duration_seconds: 1.8324
-  http_request_size_bytes_sum: 0.0  ← AI notices this is unusual
-  ...
-
-SCHEMA:
-{
-  "incident": {...},
-  "anomalies": [...],
-  "clusters": [...]
-}
-```
-
-### AI Response Format
+### Example LLM Response
 
 ```json
 {
   "incident": {
-    "title": "Missing HTTP Request Size Metrics",
-    "severity": "medium",
-    "summary": "Request size sum is zero despite 130 total requests",
-    "root_cause": "Instrumentation configuration issue",
+    "title": "High Memory Usage with Disk I/O Spikes",
+    "severity": "high",
+    "summary": "Memory at 92% with unusual disk write patterns",
+    "root_cause": "Potential memory leak causing swap usage",
     "fix_plan": {
-      "immediate": ["Check prometheus-fastapi-instrumentator config"],
-      "prevention": ["Add monitoring for metric collection gaps"]
+      "immediate": ["Restart affected service", "Check application logs"],
+      "prevention": ["Add memory profiling", "Set up swap alerts"]
     }
   },
   "anomalies": [
     {
-      "metric": "http_request_size_bytes_sum",
-      "instance": "host.docker.internal:8000",
-      "observed": 0.0,
-      "expected": "non-zero average size per request",
-      "symptom": "Zero request body size recorded"
+      "metric": "node_memory_MemAvailable_bytes",
+      "instance": "192.168.1.4:9182",
+      "observed": "800MB",
+      "expected": "4GB average",
+      "symptom": "Memory critically low"
     }
   ]
 }
@@ -262,36 +426,80 @@ SCHEMA:
 ### Email Alert Example
 
 ```
-Subject: [MEDIUM] Missing HTTP Request Size Metrics
+Subject: [HIGH] High Memory Usage with Disk I/O Spikes
 
-🟡 MEDIUM INCIDENT
+🔴 HIGH INCIDENT
 ─────────────────
-Window: 2026-01-29 03:15 -> 03:16 IST
+Window: 2026-01-31 15:20 → 15:21 IST
 
-Summary: Request size sum is zero despite 130 total requests
+Summary: Memory at 92% with unusual disk write patterns
 
-Root Cause: Instrumentation configuration issue
+Root Cause: Potential memory leak causing swap usage
 
 Immediate Actions:
-• Check prometheus-fastapi-instrumentator config
+• Restart affected service
+• Check application logs
 
-Anomalies: 1 | Confidence: 75%
+Anomalies: 2 | Confidence: 85%
 ```
 
 ### Slack Alert Example
 
 ```
-🟡 [MEDIUM] Missing HTTP Request Size Metrics
-📅 Window: 2026-01-29 03:15 -> 03:16 IST
-📋 Request size sum is zero despite 130 total requests
-🔍 Root Cause: Instrumentation configuration issue
-⚡ Actions: Check prometheus-fastapi-instrumentator config
-📊 Anomalies: 1
+🔴 [HIGH] High Memory Usage with Disk I/O Spikes
+📅 Window: 2026-01-31 15:20 → 15:21 IST
+📋 Memory at 92% with unusual disk write patterns
+🔍 Root Cause: Potential memory leak causing swap usage
+⚡ Actions: Restart affected service, Check application logs
+📊 Anomalies: 2
 ```
 
 ---
 
 ## 🐛 Troubleshooting
+
+### Prometheus Targets Not Loading
+
+**Issue:** Dashboard shows 0 metric batches
+
+**Check:**
+1. Prometheus is running: http://localhost:9090/targets
+2. `targets.json` is mounted in Docker container
+3. Target server is accessible and running exporter
+
+**Solution:**
+```bash
+# Restart Prometheus to reload targets
+docker-compose restart prometheus
+
+# Verify target is UP in Prometheus UI
+# http://localhost:9090/targets
+```
+
+### Email/Slack Notifications Not Working
+
+**Issue:** Alerts not being sent despite anomalies detected
+
+**Reason:** Email/Slack configs are **per-user**, not global
+
+**Solution:**
+1. Login to your account
+2. Go to Settings → Email Config or Alerts & Servers
+3. Enable and configure your settings
+4. Click "Test Email" or "Test Slack" to verify
+5. Save configuration
+
+The system will now use YOUR configured recipients/webhook, not the `.env` defaults.
+
+### Dashboard Shows "Inactive" for Email/Slack
+
+**Issue:** Configured email/Slack but dashboard shows inactive
+
+**Solution:**
+1. Refresh browser
+2. Go to Settings and toggle OFF then ON
+3. Click Save again
+4. Return to Dashboard - should show "Active"
 
 ### No Anomalies Being Detected
 
@@ -300,66 +508,25 @@ Anomalies: 1 | Confidence: 75%
 - ✅ AI doesn't see any issues
 - ✅ Everything is within normal operating parameters
 
-The AI only alerts when it **genuinely** detects problems, not based on arbitrary thresholds.
+The AI only alerts when it **genuinely** detects problems.
 
-### Prometheus Not Returning Metrics
+### Frontend Can't Connect to Backend
 
-**Check Prometheus:**
+**Issue:** CORS errors or 401 Unauthorized
+
+**Check:**
+1. Backend is running on port 8000
+2. Frontend is running on port 5173
+3. You're logged in (check localStorage for token)
+
+**Solution:**
 ```bash
-curl http://localhost:9090/api/v1/query?query=up
+# Backend
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Frontend
+cd frontend && npm run dev
 ```
-
-**Check Backend Logs:**
-```
-[Batch] No metrics - skipping
-```
-
-**Solution:** Configure Prometheus to scrape your FastAPI app:
-```yaml
-# prometheus.yml
-scrape_configs:
-  - job_name: 'fastapi'
-    static_configs:
-      - targets: ['localhost:8000']
-```
-
-### Timestamps Wrong in Frontend
-
-**Issue:** Times showing in UTC instead of IST
-
-**Solution:** Replace frontend `Anomalies.jsx` with the IST-fixed version
-
-### Email Not Sending
-
-**Common issues:**
-1. Gmail requires App Password, not regular password
-2. `SMTP_USER` and `SMTP_PASSWORD` must be set in `.env`
-3. Email config must be enabled via API: `PUT /agent/email-config`
-
-**Test SMTP:**
-```bash
-curl -X POST http://localhost:8000/agent/test-email
-```
-
-### LLM Not Responding
-
-**Check Ollama:**
-```bash
-ollama list  # Should show llama3.2
-curl http://localhost:11434/api/tags
-```
-
-**Pull model if missing:**
-```bash
-ollama pull llama3.2
-```
-
-### LLM Too Slow
-
-**Options:**
-1. Use smaller model: `LLM_MODEL=llama3.2:1b` (faster but less accurate)
-2. Increase batch interval: `BATCH_INTERVAL_MINUTES=5` (analyze less frequently)
-3. Reduce metrics: `BATCH_MAX_METRICS=300` (send less data to LLM)
 
 ---
 
@@ -367,83 +534,119 @@ ollama pull llama3.2
 
 ### MongoDB Collections
 
-| Collection | Purpose | Retention |
-|-----------|---------|-----------|
-| `metrics_batches` | Prometheus metric snapshots | Permanent |
-| `incidents` | AI-detected incidents | Permanent |
-| `anomalies` | Individual anomalies from LLM | Permanent |
-| `rca` | Root cause analyses | Permanent |
-| `chat_sessions` | AI chat history | 30 days |
-| `email_config` | Email recipients | Permanent |
-| `slack_config` | Slack webhook settings | Permanent |
-| `targets` | Prometheus targets | Permanent |
+| Collection | Purpose | User-Specific |
+|-----------|---------|---------------|
+| `users` | User accounts | ✅ |
+| `metrics_batches` | Prometheus metric snapshots | ✅ |
+| `incidents` | AI-detected incidents | ✅ |
+| `anomalies` | Individual anomalies | ✅ |
+| `rca` | Root cause analyses | ✅ |
+| `targets` | Prometheus targets | ✅ |
+| `email_config` | Email settings | ✅ |
+| `slack_config` | Slack settings | ✅ |
+| `chat_sessions` | AI chat history | ✅ |
 
-### Session Cleanup
-
-Chat sessions are cleaned up automatically after 30 days. To change retention, edit `main.py` line 392:
-
-```python
-
-# Keep for 1 month
-session_manager.cleanup_old_sessions(db, hours=720)
-
-```
+All collections (except `users`) include `user_id` field for data isolation.
 
 ---
 
 ## ⚡ Performance
 
-### Benchmarks (1-minute batches, 16 metrics)
+### Benchmarks (1-minute batches, ~20 metrics)
 
 | Metric | Value |
 |--------|-------|
 | Metric fetch | ~1s |
-| LLM analysis | 10-15s |
+| LLM analysis (OpenAI) | 2-5s |
+| LLM analysis (Ollama) | 10-15s |
 | Alert delivery | 1-2s |
-| **Total cycle** | **~15s** |
+| **Total cycle** | **~5-15s** |
 | Memory usage | ~200MB |
+| Concurrent users | 20+ |
 
+### Scaling Recommendations
+
+- **1-10 users:** Single server setup (current)
+- **10-50 users:** Add Redis for session management
+- **50+ users:** Separate batch workers, load balancer
+- **100+ users:** Kubernetes deployment, managed MongoDB
+
+---
 
 ## 🔒 Security
 
-### Best Practices
+### Current Implementation
 
-- ✅ Store secrets in `.env` (never commit to git)
-- ✅ Use MongoDB authentication in production
-- ✅ Restrict CORS to known domains
-- ✅ Use HTTPS for public deployments
-- ✅ Rotate Slack webhooks regularly
-- ✅ Use App Passwords for Gmail (not regular passwords)
-- ✅ Keep dependencies updated: `pip install --upgrade -r requirements.txt`
+- ✅ JWT authentication with Argon2 password hashing
+- ✅ User data isolation via `user_id` filtering
+- ✅ Protected API endpoints
+- ✅ CORS configured for localhost
+- ✅ HTTP-only cookies option available
+
+### Production Hardening
+
+See `production_auth_blueprint.md` for comprehensive security guide including:
+
+- Rate limiting
+- Strong JWT secrets
+- Email verification
+- Password reset flow
+- 2FA/TOTP
+- Session management
+- HTTPS enforcement
+- Secrets management
+
+### Quick Security Wins
+
+```bash
+# 1. Generate strong JWT secret
+python -c "import secrets; print(secrets.token_urlsafe(64))"
+# Update JWT_SECRET_KEY in .env
+
+# 2. Restrict CORS in production
+# Edit app/main.py:
+allow_origins=["https://yourdomain.com"]
+
+# 3. Use environment-based config
+ENVIRONMENT=production
+FRONTEND_URL=https://yourdomain.com
+```
+
+---
+
+## 🚀 Deployment
+
+### Docker Deployment
+
+```bash
+# Build backend
+docker build -t ai-devops-monitor .
+
+# Run with docker-compose
+docker-compose up -d
+```
 
 ### Production Checklist
 
-- [ ] `.env` in `.gitignore`
-- [ ] MongoDB authentication enabled
-- [ ] CORS restricted to frontend domain
-- [ ] Firewall rules configured
-- [ ] Regular backups scheduled
-- [ ] Monitoring alerts tested
-- [ ] Langfuse session tracking verified
+- [ ] Set `ENVIRONMENT=production` in `.env`
+- [ ] Generate strong `JWT_SECRET_KEY`
+- [ ] Configure `FRONTEND_URL` to production domain
+- [ ] Enable MongoDB authentication
+- [ ] Set up HTTPS/SSL certificates
+- [ ] Configure firewall rules
+- [ ] Set up automated backups
+- [ ] Test email/Slack alerts
+- [ ] Monitor application logs
+- [ ] Set up health check monitoring
 
 ---
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/amazing-feature`
-3. Commit changes: `git commit -m 'Add amazing feature'`
-4. Push to branch: `git push origin feature/amazing-feature`
-5. Open a Pull Request
-
 ## 🙏 Acknowledgments
 
 - **FastAPI** - Modern async web framework
+- **React** - Frontend UI library
 - **Prometheus** - Industry-standard metrics
 - **MongoDB** - Flexible document storage
-- **Ollama** - Easy local LLM deployment
+- **OpenAI** - GPT models for analysis
 - **Langfuse** - LLM observability and cost tracking
+- **Argon2** - Secure password hashing
 
----

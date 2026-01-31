@@ -1,194 +1,241 @@
 /**
  * API Service
- * Matches endpoints from main.py backend
+ * Fetch ALL database data (auto-pagination)
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+// You can override these from .env if needed:
+const DEFAULT_PAGE_SIZE = Number(import.meta.env.VITE_PAGE_SIZE || 500);
+const MAX_PAGES = Number(import.meta.env.VITE_MAX_PAGES || 500); // safety cap
+
+async function fetchJson(url, opts = {}) {
+  // Add Authorization header if token exists
+  const token = localStorage.getItem('token');
+  const headers = {
+    ...opts.headers,
+  };
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const res = await fetch(url, { ...opts, headers });
+
+  // Handle 401 Unauthorized - redirect to login
+  if (res.status === 401) {
+    localStorage.removeItem('token');
+    window.location.href = '/login';
+    throw new Error('Unauthorized - please login');
+  }
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Fetch all pages from an endpoint that supports:
+ *   ?limit=<pageSize>&skip=<offset>
+ * And returns either:
+ *   { [key]: [...] }  OR  [...]
+ */
+async function fetchAllPages(endpoint, key, pageSize = DEFAULT_PAGE_SIZE) {
+  const all = [];
+  let skip = 0;
+
+  // To prevent infinite loops when backend ignores skip/limit
+  let lastFirstId = null;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const qs = new URLSearchParams({
+      limit: String(pageSize),
+      skip: String(skip),
+    }).toString();
+
+    const url = `${API_BASE_URL}/${endpoint}?${qs}`;
+    const data = await fetchJson(url);
+
+    const list = Array.isArray(data) ? data : data?.[key] || [];
+    if (!Array.isArray(list) || list.length === 0) break;
+
+    // Guard: if backend ignores pagination, it may return same page again
+    const firstId = list?.[0]?._id ? String(list[0]._id) : null;
+    if (firstId && firstId === lastFirstId) break;
+    lastFirstId = firstId;
+
+    all.push(...list);
+
+    // If last page
+    if (list.length < pageSize) break;
+
+    skip += pageSize;
+  }
+
+  return all;
+}
 
 export const api = {
-    // ============ HEALTH & STATS ============
+  // ============ HEALTH & STATS ============
 
-    async getHealth() {
-        const response = await fetch(`${API_BASE_URL}/health`);
-        if (!response.ok) throw new Error('Failed to fetch health status');
-        return response.json();
-    },
+  async getHealth() {
+    return fetchJson(`${API_BASE_URL}/health`);
+  },
 
-    async getStats() {
-        const response = await fetch(`${API_BASE_URL}/stats`);
-        if (!response.ok) throw new Error('Failed to fetch stats');
-        return response.json();
-    },
+  async getStats() {
+    return fetchJson(`${API_BASE_URL}/stats`);
+  },
 
-    // ============ DATA ENDPOINTS ============
+  // ============ DATA ENDPOINTS ============
 
-    async getPromMetrics() {
-        const response = await fetch(`${API_BASE_URL}/prom-metrics`);
-        if (!response.ok) throw new Error('Failed to fetch Prometheus metrics');
-        return response.json();
-    },
+  async getPromMetrics() {
+    return fetchJson(`${API_BASE_URL}/prom-metrics`);
+  },
 
-    async getAnomalies() {
-        const response = await fetch(`${API_BASE_URL}/anomalies`);
-        if (!response.ok) throw new Error('Failed to fetch anomalies');
-        return response.json();
-    },
+  // ✅ Updated: fetch ALL anomalies
+  async getAnomalies() {
+    const anomalies = await fetchAllPages("anomalies", "anomalies");
+    return { anomalies };
+  },
 
-    async getRCA() {
-        const response = await fetch(`${API_BASE_URL}/rca`);
-        if (!response.ok) throw new Error('Failed to fetch RCA');
-        return response.json();
-    },
+  // ✅ Updated: fetch ALL RCA results
+  async getRCA() {
+    const rca = await fetchAllPages("rca", "rca");
+    return { rca };
+  },
 
-    // ============ CHAT ENDPOINT ============
+  // ============ CHAT ENDPOINT ============
 
-    async chat(payload) {
-        const response = await fetch(`${API_BASE_URL}/api/chat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-        if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.detail || 'Chat failed');
-        }
-        return response.json();
-    },
+  async chat(payload) {
+    return fetchJson(`${API_BASE_URL}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  },
 
-    // ============ SESSION MANAGEMENT ============
+  // ============ SESSION MANAGEMENT ============
 
-    async getSessions() {
-        const response = await fetch(`${API_BASE_URL}/api/sessions`);
-        if (!response.ok) throw new Error('Failed to fetch sessions');
-        return response.json();
-    },
+  async getSessions() {
+    return fetchJson(`${API_BASE_URL}/api/sessions`);
+  },
 
-    async getSessionDetails(sessionId) {
-        const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`);
-        if (!response.ok) throw new Error('Failed to fetch session details');
-        return response.json();
-    },
+  async getSessionDetails(sessionId) {
+    return fetchJson(`${API_BASE_URL}/api/sessions/${sessionId}`);
+  },
 
-    async deleteSession(sessionId) {
-        const response = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, {
-            method: 'DELETE'
-        });
-        if (!response.ok) {
-            const data = await response.json();
-            throw new Error(data.detail || 'Failed to delete session');
-        }
-        return response.json();
-    },
+  async deleteSession(sessionId) {
+    return fetchJson(`${API_BASE_URL}/api/sessions/${sessionId}`, {
+      method: "DELETE",
+    });
+  },
 
-    // ============ EMAIL CONFIGURATION ============
+  // ============ EMAIL CONFIGURATION ============
 
-    async getEmailConfig() {
-        const response = await fetch(`${API_BASE_URL}/agent/email-config`);
-        if (!response.ok) throw new Error('Failed to fetch email config');
-        return response.json();
-    },
+  async getEmailConfig() {
+    return fetchJson(`${API_BASE_URL}/agent/email-config`);
+  },
 
-    async updateEmailConfig(config) {
-        const response = await fetch(`${API_BASE_URL}/agent/email-config`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config)
-        });
-        if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.detail || 'Failed to update email config');
-        }
-        return response.json();
-    },
+  async updateEmailConfig(config) {
+    return fetchJson(`${API_BASE_URL}/agent/email-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+  },
 
-    async sendTestEmail() {
-        const response = await fetch(`${API_BASE_URL}/agent/test-email`, {
-            method: 'POST'
-        });
-        if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.detail || 'Failed to send test email');
-        }
-        return response.json();
-    },
+  async sendTestEmail() {
+    return fetchJson(`${API_BASE_URL}/agent/test-email`, { method: "POST" });
+  },
 
-    // ============ SLACK (ENV ONLY) ============
+  // ============ SLACK (ENV ONLY) ============
 
-    async getSlackStatus() {
-        const response = await fetch(`${API_BASE_URL}/agent/slack-status`);
-        if (!response.ok) throw new Error('Failed to fetch Slack status');
-        return response.json();
-    },
+  async getSlackStatus() {
+    return fetchJson(`${API_BASE_URL}/agent/slack-status`);
+  },
 
-    async sendTestSlack() {
-        const response = await fetch(`${API_BASE_URL}/agent/test-slack`, {
-            method: 'POST'
-        });
-        if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.detail || 'Failed to send test Slack message');
-        }
-        return response.json();
-    },
+  async sendTestSlack() {
+    return fetchJson(`${API_BASE_URL}/agent/test-slack`, { method: "POST" });
+  },
 
-    // ============ SERVER / TARGET MANAGEMENT ============
+  // ============ SERVER / TARGET MANAGEMENT ============
 
-    async getTargets() {
-        const response = await fetch(`${API_BASE_URL}/agent/targets`);
-        if (!response.ok) throw new Error('Failed to fetch targets');
-        return response.json();
-    },
+  async getTargets() {
+    return fetchJson(`${API_BASE_URL}/agent/targets`);
+  },
 
-    async addTarget(target) {
-        const response = await fetch(`${API_BASE_URL}/agent/targets`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(target)
-        });
-        if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.detail || 'Failed to add target');
-        }
-        return response.json();
-    },
+  async addTarget(target) {
+    return fetchJson(`${API_BASE_URL}/agent/targets`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(target),
+    });
+  },
 
-    async removeTarget(endpoint) {
-        const response = await fetch(`${API_BASE_URL}/agent/targets/${encodeURIComponent(endpoint)}`, {
-            method: 'DELETE'
-        });
-        if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.detail || 'Failed to remove target');
-        }
-        return response.json();
-    },
+  async removeTarget(endpoint) {
+    return fetchJson(
+      `${API_BASE_URL}/agent/targets/${encodeURIComponent(endpoint)}`,
+      { method: "DELETE" }
+    );
+  },
 
-    // ============ SLACK CONFIGURATION ============
+  // ============ SLACK CONFIGURATION ============
 
-    async getSlackConfig() {
-        const response = await fetch(`${API_BASE_URL}/agent/slack-config`);
-        if (!response.ok) throw new Error('Failed to fetch Slack config');
-        return response.json();
-    },
+  async getSlackConfig() {
+    return fetchJson(`${API_BASE_URL}/agent/slack-config`);
+  },
 
-    async updateSlackConfig(config) {
-        const response = await fetch(`${API_BASE_URL}/agent/slack-config`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config)
-        });
-        if (!response.ok) {
-            const data = await response.json().catch(() => ({}));
-            throw new Error(data.detail || 'Failed to update Slack config');
-        }
-        return response.json();
-    },
+  async updateSlackConfig(config) {
+    return fetchJson(`${API_BASE_URL}/agent/slack-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(config),
+    });
+  },
 
-    // ============ LANGFUSE STATUS ============
+  // ============ LANGFUSE STATUS ============
 
-    async getLangfuseStatus() {
-        const response = await fetch(`${API_BASE_URL}/langfuse/status`);
-        if (!response.ok) throw new Error('Failed to fetch Langfuse status');
-        return response.json();
-    }
+  async getLangfuseStatus() {
+    return fetchJson(`${API_BASE_URL}/langfuse/status`);
+  },
+
+  // ============ IP-FILTERED DATA ============
+  // These endpoints remain for internal data filtering
+
+  async getMetricsByIP(ip) {
+    const metrics = await fetchAllPages(`metrics/by-ip?ip=${encodeURIComponent(ip)}`, "metrics");
+    return { metrics };
+  },
+
+  async getAnomaliesByIP(ip) {
+    const anomalies = await fetchAllPages(`anomalies/by-ip?ip=${encodeURIComponent(ip)}`, "anomalies");
+    return { anomalies };
+  },
+
+  async getIncidentsByIP(ip) {
+    const incidents = await fetchAllPages(`incidents/by-ip?ip=${encodeURIComponent(ip)}`, "incidents");
+    return { incidents };
+  },
+
+  async getRCAByIP(ip) {
+    const rca = await fetchAllPages(`rca/by-ip?ip=${encodeURIComponent(ip)}`, "rca");
+    return { rca };
+  },
+
+  async getBatchesByIP(ip) {
+    const batches = await fetchAllPages(`batches/by-ip?ip=${encodeURIComponent(ip)}`, "batches");
+    return { batches };
+  },
+
+  async getBatches() {
+    const batches = await fetchAllPages("batches", "batches");
+    return { batches };
+  },
+
+  async getIncidents() {
+    const incidents = await fetchAllPages("incidents", "incidents");
+    return { incidents };
+  },
 };

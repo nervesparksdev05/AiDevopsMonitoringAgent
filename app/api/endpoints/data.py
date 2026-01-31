@@ -1,16 +1,23 @@
 """
-Data Retrieval Routes - FIXED ObjectId serialization error
+Data Retrieval Routes - Pagination + Correct IST fields + User Filtering
+Fixes:
+- sort by created_at_ist / timestamp_ist (not created_at)
+- consistent timestamp output for UI
+- supports skip+limit so frontend can fetch ALL rows
+- user authentication and data isolation
 """
 from __future__ import annotations
-from fastapi import APIRouter, HTTPException
+
+from fastapi import APIRouter, HTTPException, Query, Depends
 from datetime import datetime, timedelta
 from app.services.mongodb_service import get_db
+from app.schemas.user import User
+from app.core.auth import get_current_user
 
 router = APIRouter()
 
 
 def _iso(d):
-    """Convert datetime to ISO string"""
     if isinstance(d, datetime):
         return d.isoformat()
     return d
@@ -22,166 +29,220 @@ def _stringify_id(doc: dict, field: str = "_id"):
     return doc
 
 
+def _clamp_limit(limit: int, default: int, max_limit: int):
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = default
+    if limit <= 0:
+        limit = default
+    return min(limit, max_limit)
+
+
 @router.get("/stats")
-def get_stats():
-    """Get statistics - FIXED ObjectId serialization"""
+def get_stats(user: User = Depends(get_current_user)):
+    """Get stats for current user only"""
     db = get_db()
     if db is None:
         return {"collections": {}}
 
-    # Get email config safely
-    email_config = db.email_config.find_one({}) or {}
+    user_filter = {"user_id": user.id}
+
+    email_config = db.email_config.find_one(user_filter) or {}
     email_enabled = email_config.get("enabled", False)
     email_recipients = len(email_config.get("recipients", []))
-    
-    # Get slack config safely
-    slack_config = db.slack_config.find_one({}) or {}
+
+    slack_config = db.slack_config.find_one(user_filter) or {}
     slack_enabled = slack_config.get("enabled", False)
     slack_webhook = slack_config.get("webhook_url", "")
 
     return {
         "collections": {
-            "metrics_batches": {"total": db.metrics_batches.count_documents({})},
-            "incidents": {"total": db.incidents.count_documents({})},
-            "metrics": {"total": db.metrics.count_documents({})},
+            "metrics_batches": {"total": db.metrics_batches.count_documents(user_filter)},
+            "incidents": {"total": db.incidents.count_documents(user_filter)},
+            "metrics": {"total": db.metrics.count_documents(user_filter)},
             "anomalies": {
-                "total": db.anomalies.count_documents({}),
-                "open": db.anomalies.count_documents({"severity": {"$in": ["critical", "high"]}}),
-                "analyzed": db.rca.count_documents({})
+                "total": db.anomalies.count_documents(user_filter),
+                "open": db.anomalies.count_documents({**user_filter, "severity": {"$in": ["critical", "high"]}}),
+                "analyzed": db.rca.count_documents(user_filter),
             },
             "chat_sessions": {
-                "total": db.chat_sessions.count_documents({}),
+                "total": db.chat_sessions.count_documents(user_filter),
                 "active": db.chat_sessions.count_documents({
+                    **user_filter,
                     "last_activity": {"$gte": datetime.utcnow() - timedelta(hours=1)}
                 }),
             },
         },
         "notifications": {
-            "email": {
-                "enabled": email_enabled,
-                "recipients": email_recipients
-            },
-            "slack": {
-                "enabled": slack_enabled,
-                "configured": bool(slack_webhook)
-            }
-        }
+            "email": {"enabled": email_enabled, "recipients": email_recipients},
+            "slack": {"enabled": slack_enabled, "configured": bool(slack_webhook)},
+        },
     }
 
 
 @router.get("/batches")
-def get_batches(limit: int = 10):
-    """Get recent metrics batches"""
+def get_batches(
+    user: User = Depends(get_current_user),
+    limit: int = Query(10000, ge=1),
+    skip: int = Query(0, ge=0),
+):
+    """Get batches for current user only"""
     db = get_db()
     if db is None:
         return {"batches": []}
-    
-    docs = list(db.metrics_batches.find().sort("collected_at", -1).limit(max(1, min(limit, 50))))
+
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+
+    # Prefer new IST fields, fallback to older ones if present
+    sort_fields = [("collected_at_ist", -1), ("collected_at", -1), ("timestamp", -1)]
+
+    cursor = db.metrics_batches.find({"user_id": user.id}).sort(sort_fields).skip(skip).limit(limit)
+    docs = list(cursor)
+
     for d in docs:
         _stringify_id(d)
-        d["collected_at"] = _iso(d.get("collected_at"))
-        d["window_start"] = _iso(d.get("window_start"))
-        d["window_end"] = _iso(d.get("window_end"))
-    
+        # send UI-friendly timestamps
+        d["collected_at"] = _iso(d.get("collected_at_ist") or d.get("collected_at") or d.get("timestamp"))
+        d["window_start"] = _iso(d.get("window_start_ist") or d.get("window_start"))
+        d["window_end"] = _iso(d.get("window_end_ist") or d.get("window_end"))
+
     return {"batches": docs}
 
 
 @router.get("/incidents")
-def get_incidents(limit: int = 20):
-    """Get recent incidents"""
+def get_incidents(
+    user: User = Depends(get_current_user),
+    limit: int = Query(10000, ge=1),
+    skip: int = Query(0, ge=0),
+):
+    """Get incidents for current user only"""
     db = get_db()
     if db is None:
         return {"incidents": []}
-    
-    docs = list(db.incidents.find().sort("created_at", -1).limit(max(1, min(limit, 100))))
+
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+    sort_fields = [("created_at_ist", -1), ("created_at", -1), ("timestamp", -1)]
+
+    docs = list(db.incidents.find({"user_id": user.id}).sort(sort_fields).skip(skip).limit(limit))
     for d in docs:
         _stringify_id(d)
-        d["batch_id"] = str(d.get("batch_id")) if d.get("batch_id") is not None else ""
-        d["created_at"] = _iso(d.get("created_at"))
-        d["timestamp"] = _iso(d.get("timestamp") or d.get("created_at"))
-        d["window_start"] = _iso(d.get("window_start"))
-        d["window_end"] = _iso(d.get("window_end"))
-    
+        if "batch_id" in d:
+            d["batch_id"] = str(d.get("batch_id") or "")
+        # Consistent timestamp for frontend
+        d["timestamp"] = _iso(d.get("created_at_ist") or d.get("created_at") or d.get("timestamp"))
+        d["window_start"] = _iso(d.get("window_start_ist") or d.get("window_start"))
+        d["window_end"] = _iso(d.get("window_end_ist") or d.get("window_end"))
+
     return {"incidents": docs}
 
 
 @router.get("/anomalies")
-def get_anomalies(limit: int = 50):
-    """Get recent anomalies"""
+def get_anomalies(
+    user: User = Depends(get_current_user),
+    limit: int = Query(10000, ge=1),
+    skip: int = Query(0, ge=0),
+):
+    """
+    Get anomalies for current user only
+    Supports pagination: /anomalies?limit=10000&skip=0
+    """
     db = get_db()
     if db is None:
         return {"anomalies": []}
-    
-    docs = list(db.anomalies.find().sort("created_at", -1).limit(max(1, min(limit, 200))))
+
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+
+    # ✅ Prefer new IST field, fallback to old
+    sort_fields = [("created_at_ist", -1), ("created_at", -1), ("timestamp", -1)]
+
+    docs = list(db.anomalies.find({"user_id": user.id}).sort(sort_fields).skip(skip).limit(limit))
     for d in docs:
         _stringify_id(d)
-        d["timestamp"] = _iso(d.get("created_at") or d.get("timestamp"))
+
+        # ✅ UI timestamp always populated
+        d["timestamp"] = _iso(d.get("created_at_ist") or d.get("created_at") or d.get("timestamp"))
+
         if "incident_id" in d:
             d["incident_id"] = str(d.get("incident_id") or "")
         if "batch_id" in d:
             d["batch_id"] = str(d.get("batch_id") or "")
-        
-        # Ensure severity exists
+
         if "severity" not in d:
             d["severity"] = "medium"
-    
+
     return {"anomalies": docs}
 
 
 @router.get("/rca")
-def get_rca(limit: int = 20):
-    """Get recent RCA docs"""
+def get_rca(
+    user: User = Depends(get_current_user),
+    limit: int = Query(10000, ge=1),
+    skip: int = Query(0, ge=0),
+):
+    """
+    Get RCA results for current user only
+    Supports pagination: /rca?limit=10000&skip=0
+    """
     db = get_db()
     if db is None:
         return {"rca": []}
-    
-    docs = list(db.rca.find().sort("timestamp", -1).limit(max(1, min(limit, 100))))
+
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+
+    # ✅ Prefer timestamp_ist / timestamp_ist_str if you use it, fallback otherwise
+    sort_fields = [("timestamp_ist", -1), ("timestamp", -1), ("created_at_ist", -1), ("created_at", -1)]
+
+    docs = list(db.rca.find({"user_id": user.id}).sort(sort_fields).skip(skip).limit(limit))
     for d in docs:
         _stringify_id(d)
-        d["timestamp"] = _iso(d.get("timestamp"))
-        d["batch_id"] = str(d.get("batch_id") or "")
-        if "incident_id" in d:
-            d["incident_id"] = str(d.get("incident_id") or "")
-        d["window_start"] = _iso(d.get("window_start"))
-        d["window_end"] = _iso(d.get("window_end"))
-    
+        d["timestamp"] = _iso(d.get("timestamp_ist") or d.get("timestamp") or d.get("created_at_ist") or d.get("created_at"))
+        # Convert all ObjectId fields to strings
+        if "batch_id" in d and d["batch_id"]:
+            d["batch_id"] = str(d["batch_id"])
+        if "incident_id" in d and d["incident_id"]:
+            d["incident_id"] = str(d["incident_id"])
+        if "anomaly_id" in d and d["anomaly_id"]:
+            d["anomaly_id"] = str(d["anomaly_id"])
+        d["window_start"] = _iso(d.get("window_start_ist") or d.get("window_start"))
+        d["window_end"] = _iso(d.get("window_end_ist") or d.get("window_end"))
+
     return {"rca": docs}
 
 
 @router.get("/prom-metrics")
-def get_prom_metrics():
-    """Get recent Prometheus metrics snapshots"""
+def get_prom_metrics(limit: int = Query(10000, ge=1), skip: int = Query(0, ge=0)):
     db = get_db()
     if db is None:
         return {"metrics": []}
-    
-    docs = list(db.metrics.find().sort("timestamp", -1).limit(10))
+
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+    docs = list(db.metrics.find().sort([("timestamp", -1)]).skip(skip).limit(limit))
     for d in docs:
         _stringify_id(d)
         d["timestamp"] = _iso(d.get("timestamp"))
-    
+
     return {"metrics": docs}
 
 
 @router.get("/api/sessions")
-def get_sessions():
-    """Get all chat sessions"""
+def get_sessions(limit: int = Query(10000, ge=1), skip: int = Query(0, ge=0)):
     db = get_db()
     if db is None:
         return {"sessions": []}
 
-    sessions = list(db.chat_sessions.find().sort("last_activity", -1).limit(50))
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+    sessions = list(db.chat_sessions.find().sort("last_activity", -1).skip(skip).limit(limit))
     for s in sessions:
         _stringify_id(s)
         s["created_at"] = _iso(s.get("created_at"))
         s["last_activity"] = _iso(s.get("last_activity"))
-    
+
     return {"sessions": sessions}
 
 
 @router.get("/api/sessions/{session_id}")
 def get_session_details(session_id: str):
-    """Get details for a specific session"""
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
@@ -194,13 +255,11 @@ def get_session_details(session_id: str):
     _stringify_id(session)
     session["created_at"] = _iso(session.get("created_at"))
     session["last_activity"] = _iso(session.get("last_activity"))
-    
     return session
 
 
 @router.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str):
-    """Delete a chat session"""
     db = get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
@@ -214,3 +273,114 @@ def delete_session(session_id: str):
         del session_manager.active_sessions[session_id]
 
     return {"message": "Session deleted successfully"}
+
+
+# ============ IP-FILTERED ENDPOINTS ============
+
+@router.get("/metrics/by-ip")
+def get_metrics_by_ip(ip: str, limit: int = Query(10000, ge=1), skip: int = Query(0, ge=0)):
+    """Get metrics filtered by IP address"""
+    db = get_db()
+    if db is None:
+        return {"metrics": []}
+    
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+    docs = list(db.metrics_batches.find({"ip": ip}).sort([("collected_at_ist", -1)]).skip(skip).limit(limit))
+    
+    for d in docs:
+        _stringify_id(d)
+        d["collected_at"] = _iso(d.get("collected_at_ist") or d.get("collected_at"))
+        d["window_start"] = _iso(d.get("window_start_ist") or d.get("window_start"))
+        d["window_end"] = _iso(d.get("window_end_ist") or d.get("window_end"))
+    
+    return {"metrics": docs, "total": len(docs), "ip": ip}
+
+
+@router.get("/anomalies/by-ip")
+def get_anomalies_by_ip(ip: str, limit: int = Query(10000, ge=1), skip: int = Query(0, ge=0)):
+    """Get anomalies filtered by IP address"""
+    db = get_db()
+    if db is None:
+        return {"anomalies": []}
+    
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+    docs = list(db.anomalies.find({"ip": ip}).sort([("created_at_ist", -1)]).skip(skip).limit(limit))
+    
+    for d in docs:
+        _stringify_id(d)
+        d["timestamp"] = _iso(d.get("created_at_ist") or d.get("created_at") or d.get("timestamp"))
+        if "incident_id" in d:
+            d["incident_id"] = str(d.get("incident_id") or "")
+        if "batch_id" in d:
+            d["batch_id"] = str(d.get("batch_id") or "")
+        if "severity" not in d:
+            d["severity"] = "medium"
+    
+    return {"anomalies": docs, "total": len(docs), "ip": ip}
+
+
+@router.get("/incidents/by-ip")
+def get_incidents_by_ip(ip: str, limit: int = Query(10000, ge=1), skip: int = Query(0, ge=0)):
+    """Get incidents filtered by IP address"""
+    db = get_db()
+    if db is None:
+        return {"incidents": []}
+    
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+    docs = list(db.incidents.find({"ip": ip}).sort([("created_at_ist", -1)]).skip(skip).limit(limit))
+    
+    for d in docs:
+        _stringify_id(d)
+        if "batch_id" in d:
+            d["batch_id"] = str(d.get("batch_id") or "")
+        d["timestamp"] = _iso(d.get("created_at_ist") or d.get("created_at") or d.get("timestamp"))
+        d["window_start"] = _iso(d.get("window_start_ist") or d.get("window_start"))
+        d["window_end"] = _iso(d.get("window_end_ist") or d.get("window_end"))
+    
+    return {"incidents": docs, "total": len(docs), "ip": ip}
+
+
+@router.get("/rca/by-ip")
+def get_rca_by_ip(ip: str, limit: int = Query(10000, ge=1), skip: int = Query(0, ge=0)):
+    """Get RCA results filtered by IP address"""
+    db = get_db()
+    if db is None:
+        return {"rca": []}
+    
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+    docs = list(db.rca.find({"ip": ip}).sort([("timestamp_ist", -1)]).skip(skip).limit(limit))
+    
+    for d in docs:
+        _stringify_id(d)
+        d["timestamp"] = _iso(d.get("timestamp_ist") or d.get("timestamp") or d.get("created_at_ist"))
+        # Convert all ObjectId fields to strings
+        if "batch_id" in d and d["batch_id"]:
+            d["batch_id"] = str(d["batch_id"])
+        if "incident_id" in d and d["incident_id"]:
+            d["incident_id"] = str(d["incident_id"])
+        if "anomaly_id" in d and d["anomaly_id"]:
+            d["anomaly_id"] = str(d["anomaly_id"])
+        d["window_start"] = _iso(d.get("window_start_ist") or d.get("window_start"))
+        d["window_end"] = _iso(d.get("window_end_ist") or d.get("window_end"))
+    
+    return {"rca": docs, "total": len(docs), "ip": ip}
+
+
+@router.get("/batches/by-ip")
+def get_batches_by_ip(ip: str, limit: int = Query(10000, ge=1), skip: int = Query(0, ge=0)):
+    """Get batch results filtered by IP address"""
+    db = get_db()
+    if db is None:
+        return {"batches": []}
+    
+    limit = _clamp_limit(limit, default=10000, max_limit=100000)
+    docs = list(db.metrics_batches.find({"ip": ip}).sort([("collected_at_ist", -1)]).skip(skip).limit(limit))
+    
+    for d in docs:
+        _stringify_id(d)
+        d["collected_at"] = _iso(d.get("collected_at_ist") or d.get("collected_at"))
+        d["window_start"] = _iso(d.get("window_start_ist") or d.get("window_start"))
+        d["window_end"] = _iso(d.get("window_end_ist") or d.get("window_end"))
+    
+    return {"batches": docs, "total": len(docs), "ip": ip}
+

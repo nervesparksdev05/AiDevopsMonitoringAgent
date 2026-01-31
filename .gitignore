@@ -46,6 +46,7 @@ Thumbs.db
 
 # Prometheus data
 data/
+targets.json
 
 # Logs
 *.log

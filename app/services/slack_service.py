@@ -8,13 +8,14 @@ from app.core.helpers import mask_webhook
 from app.core.logging import logger
 
 
-def get_slack_config():
-    """Get active Slack configuration (DB > Env)"""
+def get_slack_config(user_id: str = None):
+    """Get active Slack configuration for specific user (DB > Env)"""
     # 1. Check DB first
     from app.services.mongodb_service import get_db
     db = get_db()
     if db is not None:
-        config = db.slack_config.find_one({})
+        query = {"user_id": user_id} if user_id else {}
+        config = db.slack_config.find_one(query)
         if config:
             return config.get("enabled", False), config.get("webhook_url", "")
             
@@ -22,15 +23,15 @@ def get_slack_config():
     return SLACK_ENABLED, SLACK_WEBHOOK_URL
 
 
-def slack_is_configured() -> bool:
-    """Check if Slack is enabled and configured"""
-    enabled, url = get_slack_config()
+def slack_is_configured(user_id: str = None) -> bool:
+    """Check if Slack is enabled and configured for specific user"""
+    enabled, url = get_slack_config(user_id)
     return enabled and bool((url or "").strip())
 
 
-def send_slack_alert_text(text: str) -> bool:
-    """Send a simple text message to Slack"""
-    enabled, url = get_slack_config()
+def send_slack_alert_text(text: str, user_id: str = None) -> bool:
+    """Send a simple text message to Slack for specific user"""
+    enabled, url = get_slack_config(user_id)
     
     if not enabled:
         return False
