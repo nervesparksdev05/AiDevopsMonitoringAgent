@@ -93,7 +93,17 @@ export default function Dashboard() {
             {line2 ? <p className="text-xs text-gray-500 mt-2">{line2}</p> : null}
           </div>
 
-          <StatusPill ok={systemOnline} />
+          <div className="flex items-center gap-3">
+            <a
+              href="http://localhost:3001/d/server-monitoring"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
+            >
+              📊 View Live Metrics
+            </a>
+            <StatusPill ok={systemOnline} />
+          </div>
         </div>
       </div>
 

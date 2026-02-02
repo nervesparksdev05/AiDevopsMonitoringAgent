@@ -15,9 +15,9 @@ MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("MONGO_DB", "observability")
 MAX_DOCS = int(os.getenv("MAX_DOCS", "1000"))
 
-# LLM (Ollama)
+# LLM (gemma3:1b)
 LLM_URL = os.getenv("LLM_URL")
-LLM_MODEL = os.getenv("LLM_MODEL", "llama3.2")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemma3:1b")
 
 # Monitoring / Batch job
 # NOTE: interval is in seconds. Default = 30 minutes.

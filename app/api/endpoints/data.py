@@ -81,6 +81,39 @@ def get_stats(user: User = Depends(get_current_user)):
     }
 
 
+@router.get("/grafana-url")
+def get_grafana_url(
+    instance: str = Query(..., description="Server instance (e.g., 192.168.1.4:9182)"),
+    user: User = Depends(get_current_user)
+):
+    """
+    Generate Grafana dashboard URL for a specific instance
+    Returns URL with pre-selected instance, 30-minute time range, and 30s auto-refresh
+    """
+    # Base Grafana URL (can be configured via environment variable)
+    grafana_base = "http://localhost:3001"
+    
+    # Dashboard UID from the JSON file
+    dashboard_uid = "server-monitoring"
+    
+    # Build URL with parameters
+    grafana_url = (
+        f"{grafana_base}/d/{dashboard_uid}/server-monitoring"
+        f"?orgId=1"
+        f"&var-instance={instance}"
+        f"&from=now-30m"
+        f"&to=now"
+        f"&refresh=30s"
+    )
+    
+    return {
+        "grafana_url": grafana_url,
+        "instance": instance,
+        "dashboard": "Server Monitoring"
+    }
+
+
+
 @router.get("/batches")
 def get_batches(
     user: User = Depends(get_current_user),

@@ -2,7 +2,7 @@
 User Authentication Schemas
 """
 from typing import Optional
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 class UserRegister(BaseModel):
@@ -10,6 +10,14 @@ class UserRegister(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     email: EmailStr
     password: str = Field(..., min_length=6)
+    
+    @field_validator('email')
+    @classmethod
+    def validate_gmail_only(cls, v: str) -> str:
+        """Only allow gmail.com email addresses"""
+        if not v.lower().endswith('@gmail.com'):
+            raise ValueError('Only Gmail addresses (@gmail.com) are allowed for registration')
+        return v.lower()
 
 
 class UserLogin(BaseModel):
@@ -32,7 +40,13 @@ class UserResponse(BaseModel):
 class Token(BaseModel):
     """JWT token response"""
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
+
+
+class RefreshTokenRequest(BaseModel):
+    """Refresh token request"""
+    refresh_token: str
 
 
 class TokenData(BaseModel):
@@ -47,3 +61,14 @@ class User(BaseModel):
     username: str
     email: str
     active: bool = True
+
+
+class SessionResponse(BaseModel):
+    """Session information response"""
+    session_id: str
+    device: dict
+    ip_address: str
+    created_at_str: str
+    last_active_str: str
+    is_current: bool = False
+

@@ -180,6 +180,20 @@ function AnomalyCard({ anomaly }) {
   const timeText = ts ? formatTime(ts) : "—";
   const dateText = ts ? formatDate(ts) : "";
 
+  const handleViewGrafana = async () => {
+    if (!instance) {
+      alert('No instance information available for this anomaly');
+      return;
+    }
+    try {
+      const { grafana_url } = await api.getGrafanaUrl(instance);
+      window.open(grafana_url, '_blank');
+    } catch (error) {
+      console.error('Failed to get Grafana URL:', error);
+      alert('Failed to open Grafana. Make sure Grafana is running.');
+    }
+  };
+
   return (
     <div className="bg-white border border-blue-100 rounded-xl p-5 hover:shadow-sm transition-shadow">
       <div className="flex items-start justify-between gap-4">
@@ -207,6 +221,14 @@ function AnomalyCard({ anomaly }) {
           <p className="text-xs text-gray-500">Detected</p>
           <p className="text-sm font-semibold text-gray-900">{timeText}</p>
           {dateText ? <p className="text-xs text-gray-500">{dateText}</p> : null}
+          {instance && (
+            <button
+              onClick={handleViewGrafana}
+              className="mt-2 px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded hover:bg-blue-700 transition-colors"
+            >
+              📊 Grafana
+            </button>
+          )}
         </div>
       </div>
 

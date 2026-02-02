@@ -9,12 +9,14 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
-# ✅ Updated: remove LLM_MODEL import (we now read OpenAI model from env)
 from app.core.config import PROM_URL, BATCH_INTERVAL_MINUTES, MONGO_URI
 from app.core.logging import logger
 from app.core.time import now_ist, ist_to_utc, format_ist
 from app.core.helpers import parse_json
+from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 
 from app.services.langfuse_service import (
     initialize_langfuse, is_langfuse_enabled,
@@ -166,7 +168,7 @@ SCHEMA:
 RETURN ONLY JSON:"""
 
     async def call_llm(self, prompt: str, session_id: str, metadata: Dict) -> Dict:
-        # ✅ OpenAI model/provider is read by ask_llm() from env; we just pass metadata for tracing
+        # ✅ LLM model/provider is read by ask_llm() from env
         result = await asyncio.get_event_loop().run_in_executor(
             None, ask_llm, prompt, "Batch Collective RCA", metadata, session_id
         )
@@ -440,19 +442,33 @@ RETURN ONLY JSON:"""
 
             logger.info(f"[Batch]{user_log} Fetched {len(metrics)} metrics")
 
+            # ===== ACTIVE: Gemma3 metadata =====
+            llm_metadata = {
+                "window_start": start.isoformat(),
+                "window_end": end.isoformat(),
+                "metrics_count": len(metrics),
+                "timezone": "IST",
+                "user_id": self.user_id,
+                "llm_provider": "gemma3",
+                "llm_url": os.getenv("LLM_URL", ""),
+                "llm_model": os.getenv("LLM_MODEL", "gemma3:1b"),
+            }
+
+            # ===== COMMENTED: OpenAI metadata =====
+            # llm_metadata = {
+            #     "window_start": start.isoformat(),
+            #     "window_end": end.isoformat(),
+            #     "metrics_count": len(metrics),
+            #     "timezone": "IST",
+            #     "user_id": self.user_id,
+            #     "llm_provider": "openai",
+            #     "openai_model": os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+            # }
+
             analysis = await self.call_llm(
                 self.build_prompt(metrics, start, end),
                 session_id,
-                {
-                    "window_start": start.isoformat(),
-                    "window_end": end.isoformat(),
-                    "metrics_count": len(metrics),
-                    "timezone": "IST",
-                    "user_id": self.user_id,
-                    # ✅ Helpful metadata now that provider is OpenAI
-                    "llm_provider": "openai",
-                    "openai_model": os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
-                }
+                llm_metadata
             )
 
             if not analysis:
@@ -606,10 +622,17 @@ async def lifespan(app: FastAPI):
     logger.info("[Config] Timezone: IST (UTC+5:30)")
     logger.info(f"[Config] Current Time: {format_ist(now_ist())}")
     logger.info(f"[Config] Prometheus: {PROM_URL or 'NOT SET'}")
-    # ✅ Updated: log OpenAI model from env instead of old LLM_MODEL
-    logger.info(f"[Config] LLM Provider: OpenAI")
-    logger.info(f"[Config] OPENAI_MODEL: {os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')}")
-    logger.info(f"[Config] OPENAI_API_KEY: {'✅ Set' if (os.getenv('OPENAI_API_KEY') or '').strip() else '❌ NOT SET'}")
+    
+    # ===== ACTIVE: Gemma3 logging =====
+    logger.info(f"[Config] LLM Provider: Gemma3")
+    logger.info(f"[Config] LLM_URL: {os.getenv('LLM_URL', 'NOT SET')}")
+    logger.info(f"[Config] LLM_MODEL: {os.getenv('LLM_MODEL', 'gemma3:1b')}")
+    
+    # ===== COMMENTED: OpenAI logging =====
+    # logger.info(f"[Config] LLM Provider: OpenAI")
+    # logger.info(f"[Config] OPENAI_MODEL: {os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')}")
+    # logger.info(f"[Config] OPENAI_API_KEY: {'✅ Set' if (os.getenv('OPENAI_API_KEY') or '').strip() else '❌ NOT SET'}")
+    
     logger.info(f"[Config] MongoDB: {MONGO_URI[:30] if MONGO_URI else 'NOT SET'}...")
     logger.info(f"[Config] Batch Interval: {BATCH_INTERVAL_MINUTES} min")
 
@@ -624,6 +647,10 @@ async def lifespan(app: FastAPI):
             db.users.create_index("username", unique=True)
             db.users.create_index("email", unique=True)
             
+            # Create sessions collection indexes
+            db.sessions.create_index("session_id", unique=True)
+            db.sessions.create_index([("user_id", 1), ("active", 1)])
+            db.sessions.create_index("last_active")
             
             # indexes
             db.chat_sessions.create_index("session_id", unique=True)
@@ -687,6 +714,10 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Add rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,

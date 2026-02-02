@@ -9,6 +9,42 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const DEFAULT_PAGE_SIZE = Number(import.meta.env.VITE_PAGE_SIZE || 500);
 const MAX_PAGES = Number(import.meta.env.VITE_MAX_PAGES || 500); // safety cap
 
+let isRefreshing = false;
+let refreshSubscribers = [];
+
+function subscribeTokenRefresh(cb) {
+  refreshSubscribers.push(cb);
+}
+
+function onTokenRefreshed(newToken) {
+  refreshSubscribers.forEach(cb => cb(newToken));
+  refreshSubscribers = [];
+}
+
+async function refreshAccessToken() {
+  const refreshToken = localStorage.getItem('refreshToken');
+  if (!refreshToken) {
+    throw new Error('No refresh token available');
+  }
+
+  const res = await fetch(`${API_BASE_URL}/api/auth/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: refreshToken })
+  });
+
+  if (!res.ok) {
+    localStorage.removeItem('token');
+    localStorage.removeItem('refreshToken');
+    window.location.href = '/login';
+    throw new Error('Refresh token expired');
+  }
+
+  const data = await res.json();
+  localStorage.setItem('token', data.access_token);
+  return data.access_token;
+}
+
 async function fetchJson(url, opts = {}) {
   // Add Authorization header if token exists
   const token = localStorage.getItem('token');
@@ -22,11 +58,42 @@ async function fetchJson(url, opts = {}) {
 
   const res = await fetch(url, { ...opts, headers });
 
-  // Handle 401 Unauthorized - redirect to login
+  // Handle 401 Unauthorized - try to refresh token
   if (res.status === 401) {
-    localStorage.removeItem('token');
-    window.location.href = '/login';
-    throw new Error('Unauthorized - please login');
+    if (isRefreshing) {
+      // Wait for the ongoing refresh to complete
+      return new Promise((resolve) => {
+        subscribeTokenRefresh((newToken) => {
+          headers['Authorization'] = `Bearer ${newToken}`;
+          resolve(fetch(url, { ...opts, headers }).then(r => r.json()));
+        });
+      });
+    }
+
+    isRefreshing = true;
+
+    try {
+      const newToken = await refreshAccessToken();
+      isRefreshing = false;
+      onTokenRefreshed(newToken);
+
+      // Retry original request with new token
+      headers['Authorization'] = `Bearer ${newToken}`;
+      const retryRes = await fetch(url, { ...opts, headers });
+
+      if (!retryRes.ok) {
+        const data = await retryRes.json().catch(() => ({}));
+        throw new Error(data.detail || `HTTP ${retryRes.status}`);
+      }
+
+      return retryRes.json();
+    } catch (error) {
+      isRefreshing = false;
+      localStorage.removeItem('token');
+      localStorage.removeItem('refreshToken');
+      window.location.href = '/login';
+      throw error;
+    }
   }
 
   if (!res.ok) {
@@ -237,5 +304,95 @@ export const api = {
   async getIncidents() {
     const incidents = await fetchAllPages("incidents", "incidents");
     return { incidents };
+  },
+
+  // ============ AUTHENTICATION ============
+
+  async register(username, email, password) {
+    const res = await fetch(`${API_BASE_URL}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, email, password })
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Registration failed');
+    }
+
+    const data = await res.json();
+    localStorage.setItem('token', data.access_token);
+    if (data.refresh_token) {
+      localStorage.setItem('refreshToken', data.refresh_token);
+    }
+    return data;
+  },
+
+  async login(username, password) {
+    const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || 'Login failed');
+    }
+
+    const data = await res.json();
+    localStorage.setItem('token', data.access_token);
+    if (data.refresh_token) {
+      localStorage.setItem('refreshToken', data.refresh_token);
+    }
+    return data;
+  },
+
+  async logout() {
+    const refreshToken = localStorage.getItem('refreshToken');
+
+    if (refreshToken) {
+      try {
+        await fetchJson(`${API_BASE_URL}/api/auth/logout`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken })
+        });
+      } catch (error) {
+        // Ignore errors during logout
+        console.error('Logout error:', error);
+      }
+    }
+
+    localStorage.removeItem('token');
+    localStorage.removeItem('refreshToken');
+  },
+
+  async getCurrentUser() {
+    return fetchJson(`${API_BASE_URL}/api/auth/me`);
+  },
+
+  // ============ SESSION MANAGEMENT (AUTH) ============
+
+  async getAuthSessions() {
+    return fetchJson(`${API_BASE_URL}/api/auth/sessions`);
+  },
+
+  async revokeSession(sessionId) {
+    return fetchJson(`${API_BASE_URL}/api/auth/sessions/${sessionId}`, {
+      method: 'DELETE'
+    });
+  },
+
+  async revokeAllSessions(keepCurrent = true) {
+    return fetchJson(`${API_BASE_URL}/api/auth/sessions/revoke-all?keep_current=${keepCurrent}`, {
+      method: 'POST'
+    });
+  },
+
+  // ============ GRAFANA INTEGRATION ============
+
+  async getGrafanaUrl(instance) {
+    return fetchJson(`${API_BASE_URL}/grafana-url?instance=${encodeURIComponent(instance)}`);
   },
 };

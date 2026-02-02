@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import requests
 from typing import Optional, Tuple
 from datetime import datetime
 
-from openai import OpenAI
+# ✅ OpenAI support (commented out)
+# from openai import OpenAI
 
 from app.services.langfuse_service import (
     get_langfuse_client,
@@ -23,50 +25,108 @@ def ask_llm(
     session_id: Optional[str] = None,
 ) -> Optional[Tuple[str, int]]:
     """
-    OpenAI-backed LLM call with optional Langfuse tracing.
-    Reads config directly from environment:
+    LLM call with optional Langfuse tracing.
+    Supports Gemma3 (default) or OpenAI (commented out).
+    
+    Current config (Gemma3):
+      - LLM_URL: Ollama/LM Studio endpoint
+      - LLM_MODEL: Model name (default: gemma3:1b)
+    
+    OpenAI config (commented):
       - OPENAI_API_KEY
       - OPENAI_MODEL (default: gpt-4.1-mini)
+    
     Returns: (response_text, total_tokens)
     """
 
-    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
-    model = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+    # ===== GEMMA3 CONFIGURATION (ACTIVE) =====
+    llm_url = (os.getenv("LLM_URL") or "").strip()
+    model = (os.getenv("LLM_MODEL") or "gemma3:1b").strip()
+    provider = "gemma3"
 
-    if not api_key:
-        logger.error("[LLM] OPENAI_API_KEY not set")
+    if not llm_url:
+        logger.error("[LLM] LLM_URL not set")
         return None, 0
 
     logger.info(
-        f"[LLM] OpenAI model={model} | timeout={TIMEOUT_S}s | "
+        f"[LLM] Gemma3 model={model} | url={llm_url} | timeout={TIMEOUT_S}s | "
         f"prompt_chars={len(prompt or '')} words={len((prompt or '').split())}"
     )
 
-    client = OpenAI(api_key=api_key)
+    # ===== OPENAI CONFIGURATION (COMMENTED) =====
+    # api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+    # model = (os.getenv("OPENAI_MODEL") or "gpt-4.1-mini").strip()
+    # provider = "openai"
+    #
+    # if not api_key:
+    #     logger.error("[LLM] OPENAI_API_KEY not set")
+    #     return None, 0
+    #
+    # logger.info(
+    #     f"[LLM] OpenAI model={model} | timeout={TIMEOUT_S}s | "
+    #     f"prompt_chars={len(prompt or '')} words={len((prompt or '').split())}"
+    # )
+    #
+    # client = OpenAI(api_key=api_key)
 
-    def _call_llm() -> tuple[str, int, int, float]:
+    def _call_llm_gemma3() -> tuple[str, int, int, float]:
         """
+        Gemma3/Ollama API call.
         Returns: (text, input_tokens, output_tokens, latency_ms)
-        Uses OpenAI Responses API.
         """
         start_time = datetime.utcnow()
 
-        resp = client.responses.create(
-            model=model,
-            input=prompt,
-            temperature=0.2,
-            # max_output_tokens=800,
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.2,
+                # "num_predict": 800,  # max tokens
+            }
+        }
+
+        response = requests.post(
+            f"{llm_url}/api/generate",
+            json=payload,
+            timeout=TIMEOUT_S
         )
+        response.raise_for_status()
 
         latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
 
-        text = (getattr(resp, "output_text", "") or "").strip()
+        result = response.json()
+        text = (result.get("response", "") or "").strip()
 
-        usage = getattr(resp, "usage", None)
-        input_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
-        output_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+        # Gemma3/Ollama token counts
+        input_tokens = int(result.get("prompt_eval_count", 0) or 0)
+        output_tokens = int(result.get("eval_count", 0) or 0)
 
         return text, input_tokens, output_tokens, latency_ms
+
+    # def _call_llm_openai() -> tuple[str, int, int, float]:
+    #     """
+    #     OpenAI API call (COMMENTED).
+    #     Returns: (text, input_tokens, output_tokens, latency_ms)
+    #     """
+    #     start_time = datetime.utcnow()
+    #
+    #     resp = client.responses.create(
+    #         model=model,
+    #         input=prompt,
+    #         temperature=0.2,
+    #         # max_output_tokens=800,
+    #     )
+    #
+    #     latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
+    #
+    #     text = (getattr(resp, "output_text", "") or "").strip()
+    #
+    #     usage = getattr(resp, "usage", None)
+    #     input_tokens = int(getattr(usage, "input_tokens", 0) or 0) if usage else 0
+    #     output_tokens = int(getattr(usage, "output_tokens", 0) or 0) if usage else 0
+    #
+    #     return text, input_tokens, output_tokens, latency_ms
 
     langfuse = get_langfuse_client()
 
@@ -79,7 +139,7 @@ def ask_llm(
                 metadata={
                     **(metadata or {}),
                     "model": model,
-                    "provider": "openai",
+                    "provider": provider,
                     "timeout_s": TIMEOUT_S,
                     **({"session_id": session_id} if session_id else {}),
                 },
@@ -93,11 +153,16 @@ def ask_llm(
                     ) as generation:
                         try:
                             logger.info(
-                                "[LLM] Calling OpenAI..."
+                                f"[LLM] Calling {provider.upper()}..."
                                 + (f" (session: {session_id})" if session_id else "")
                             )
 
-                            text, in_tok, out_tok, latency_ms = _call_llm()
+                            # ===== ACTIVE: Gemma3 =====
+                            text, in_tok, out_tok, latency_ms = _call_llm_gemma3()
+                            
+                            # ===== COMMENTED: OpenAI =====
+                            # text, in_tok, out_tok, latency_ms = _call_llm_openai()
+                            
                             logger.info(f"[LLM] Response received ({latency_ms:.0f}ms)")
 
                             total_tokens = (
@@ -130,8 +195,14 @@ def ask_llm(
 
     # -------- fallback path --------
     try:
-        logger.info("[LLM] Calling OpenAI (no tracing)...")
-        text, in_tok, out_tok, latency_ms = _call_llm()
+        logger.info(f"[LLM] Calling {provider.upper()} (no tracing)...")
+        
+        # ===== ACTIVE: Gemma3 =====
+        text, in_tok, out_tok, latency_ms = _call_llm_gemma3()
+        
+        # ===== COMMENTED: OpenAI =====
+        # text, in_tok, out_tok, latency_ms = _call_llm_openai()
+        
         logger.info(f"[LLM] Response received ({latency_ms:.0f}ms)")
 
         total_tokens = (in_tok + out_tok) if (in_tok or out_tok) else _estimate_tokens(prompt, text)
@@ -144,6 +215,3 @@ def ask_llm(
 
 def _estimate_tokens(prompt: str, response_text: str) -> int:
     return int(len((prompt + "\n" + (response_text or "")).split()) * 1.3)
-
-
-

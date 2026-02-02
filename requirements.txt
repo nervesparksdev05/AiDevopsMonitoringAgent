@@ -11,3 +11,6 @@ PyJWT
 argon2-cffi
 email-validator
 python-multipart>=2.0.0
+slowapi>=0.1.9
+itsdangerous>=2.1.0
+user-agents>=2.2.0

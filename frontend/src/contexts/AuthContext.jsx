@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
+import { api } from '../services/api';
 
 const AuthContext = createContext(null);
 
@@ -18,19 +19,8 @@ export function AuthProvider({ children }) {
 
   const fetchCurrentUser = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/auth/me', {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-
-      if (response.ok) {
-        const userData = await response.json();
-        setUser(userData);
-      } else {
-        // Token is invalid
-        logout();
-      }
+      const userData = await api.getCurrentUser();
+      setUser(userData);
     } catch (error) {
       console.error('Failed to fetch user:', error);
       logout();
@@ -40,77 +30,29 @@ export function AuthProvider({ children }) {
   };
 
   const login = async (username, password) => {
-    const response = await fetch('http://localhost:8000/api/auth/login', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ username, password })
-    });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || 'Login failed');
-    }
-
-    const data = await response.json();
-    const newToken = data.access_token;
-    
-    localStorage.setItem('token', newToken);
-    setToken(newToken);
+    const data = await api.login(username, password);
+    setToken(data.access_token);
     
     // Fetch user data
-    const userResponse = await fetch('http://localhost:8000/api/auth/me', {
-      headers: {
-        'Authorization': `Bearer ${newToken}`
-      }
-    });
-    
-    if (userResponse.ok) {
-      const userData = await userResponse.json();
-      setUser(userData);
-    }
+    const userData = await api.getCurrentUser();
+    setUser(userData);
 
     return data;
   };
 
   const register = async (username, email, password) => {
-    const response = await fetch('http://localhost:8000/api/auth/register', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ username, email, password })
-    });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail || 'Registration failed');
-    }
-
-    const data = await response.json();
-    const newToken = data.access_token;
-    
-    localStorage.setItem('token', newToken);
-    setToken(newToken);
+    const data = await api.register(username, email, password);
+    setToken(data.access_token);
     
     // Fetch user data
-    const userResponse = await fetch('http://localhost:8000/api/auth/me', {
-      headers: {
-        'Authorization': `Bearer ${newToken}`
-      }
-    });
-    
-    if (userResponse.ok) {
-      const userData = await userResponse.json();
-      setUser(userData);
-    }
+    const userData = await api.getCurrentUser();
+    setUser(userData);
 
     return data;
   };
 
-  const logout = () => {
-    localStorage.removeItem('token');
+  const logout = async () => {
+    await api.logout();
     setToken(null);
     setUser(null);
   };

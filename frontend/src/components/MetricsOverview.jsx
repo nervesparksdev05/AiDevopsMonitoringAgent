@@ -84,6 +84,18 @@ function MetricsBatchCard({ batch }) {
     return formatDateTime(timestamp);
   };
 
+  const handleViewGrafana = async (e) => {
+    e.stopPropagation();
+    const instance = batch.instance || `${batch.ip}:${batch.port}`;
+    try {
+      const { grafana_url } = await api.getGrafanaUrl(instance);
+      window.open(grafana_url, '_blank');
+    } catch (error) {
+      console.error('Failed to get Grafana URL:', error);
+      alert('Failed to open Grafana. Make sure Grafana is running.');
+    }
+  };
+
   return (
     <div className="border border-blue-100 rounded-lg overflow-hidden">
       <div
@@ -100,9 +112,17 @@ function MetricsBatchCard({ batch }) {
               metrics
             </p>
           </div>
-          <span className="text-sm text-blue-600">
-            {expanded ? "▼" : "▶"}
-          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleViewGrafana}
+              className="px-3 py-1.5 bg-blue-600 text-white text-xs font-semibold rounded hover:bg-blue-700 transition-colors"
+            >
+              📊 Grafana
+            </button>
+            <span className="text-sm text-blue-600">
+              {expanded ? "▼" : "▶"}
+            </span>
+          </div>
         </div>
       </div>
 
