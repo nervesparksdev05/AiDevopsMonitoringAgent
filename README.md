@@ -19,13 +19,16 @@ AI DevOps Monitor is a complete multi-user monitoring platform that collects Pro
 ### ✨ Key Features
 
 - **👥 Multi-User Architecture** - Complete user isolation with JWT authentication
+- **🔐 Session Management** - JWT-based sessions with device tracking and remote revocation
 - **🤖 100% LLM-Powered Detection** - AI detects anomalies from raw metrics (no threshold rules)
 - **📊 Batch Analysis** - Analyzes entire metric batches for holistic incident detection
 - **🎯 Dynamic Target Management** - Add/remove monitoring targets via UI
+- **📈 Grafana Integration** - Universal dashboard for visualizing metrics across all exporters
+- **💬 AI Chat Assistant** - Interactive chat for querying metrics and getting insights
 - **🔔 User-Specific Alerts** - Email and Slack notifications per user
 - **💾 Full Observability** - MongoDB storage with Langfuse LLM tracking
 - **⚡ Production Ready** - Async operations, IST timezone support, comprehensive error handling
-- **🎨 Modern UI** - Beautiful React frontend with real-time updates
+- **🎨 Modern UI** - Beautiful React frontend with real-time updates and enhanced validation
 
 ---
 
@@ -65,11 +68,15 @@ cd frontend
 npm install
 ```
 
-### 3. Start Prometheus
+### 3. Start Prometheus & Grafana
 
 ```bash
 # Using Docker Compose (recommended)
 docker-compose up -d
+
+# This starts:
+# - Prometheus (port 9090)
+# - Grafana (port 3000)
 
 # Or start standalone Prometheus with prometheus.yml
 ```
@@ -90,6 +97,7 @@ npm run dev
 - **Frontend:** http://localhost:5173
 - **Backend API:** http://localhost:8000/docs
 - **Prometheus:** http://localhost:9090
+- **Grafana:** http://localhost:3000 (default login: admin/admin)
 
 ---
 
@@ -294,6 +302,15 @@ Every 1 minute (per user):
    - **Metrics:** View all collected metric batches
    - **Anomalies:** AI-detected issues
    - **RCA Results:** Root cause analyses
+   - **Grafana:** Visual dashboards at http://localhost:3000
+   - **AI Chat:** Ask questions about your metrics
+
+5. **Manage Sessions**
+   - Go to Settings → Sessions
+   - View all active login sessions
+   - See device info (browser, OS, IP address)
+   - Revoke individual sessions or all other sessions
+   - Current session is highlighted and cannot be revoked
 
 ### Adding Prometheus Targets
 
@@ -332,6 +349,9 @@ cd node_exporter-*
 | `/api/auth/register` | POST | ❌ | Create new account |
 | `/api/auth/login` | POST | ❌ | Login and get JWT |
 | `/api/auth/me` | GET | ✅ | Get current user |
+| `/api/auth/sessions` | GET | ✅ | Get all active sessions |
+| `/api/auth/sessions/{id}` | DELETE | ✅ | Revoke specific session |
+| `/api/auth/sessions/revoke-all` | POST | ✅ | Revoke all other sessions |
 
 ### Data Endpoints (All require authentication)
 
@@ -353,10 +373,107 @@ cd node_exporter-*
 | `/agent/targets` | GET/POST/DELETE | User's Prometheus targets |
 | `/agent/test-email` | POST | Send test email |
 | `/agent/test-slack` | POST | Send test Slack message |
+| `/chat` | POST | Send message to AI chat assistant |
+| `/chat/sessions` | GET | Get user's chat sessions |
+| `/chat/sessions/{id}` | GET | Get specific chat session |
 
 ### Interactive API Docs
 
 Visit http://localhost:8000/docs for full Swagger documentation with "Try it out" functionality.
+
+---
+
+## 📈 Grafana Integration
+
+### Universal Dashboard
+
+The platform includes a pre-configured Grafana dashboard that automatically detects and displays metrics from different exporters:
+
+**Features:**
+- **Auto-Detection:** Works with Windows Exporter, Node Exporter, and other Prometheus exporters
+- **Universal Metrics:** Uses OR queries to accommodate varying metric names
+- **Multi-Instance:** Displays all monitored servers in a single dashboard
+- **Real-Time:** Updates every 5 seconds
+
+**Access Grafana:**
+1. Open http://localhost:3000
+2. Login with default credentials: `admin` / `admin`
+3. Navigate to Dashboards → Server Monitoring
+4. Select instance from dropdown to view specific server
+
+**Dashboard Panels:**
+- CPU Usage (per core and total)
+- Memory Usage (available, used, total)
+- Disk I/O (read/write rates)
+- Network Traffic (sent/received)
+- System Uptime
+- Process Count
+
+**Customization:**
+The dashboard JSON is located at `grafana/dashboards/server-monitoring.json` and can be modified to add custom panels.
+
+---
+
+## 🔐 Session Management
+
+### JWT-Based Sessions
+
+The platform implements secure session management with device tracking:
+
+**Features:**
+- **Device Detection:** Automatically identifies browser, OS, and device type
+- **IP Tracking:** Records IP address for each session
+- **Activity Monitoring:** Tracks last active timestamp
+- **Remote Revocation:** Revoke sessions from any device
+- **Multi-Device Support:** Login from multiple devices simultaneously
+
+**Session Information:**
+Each session includes:
+- Device type (Desktop, Mobile, Tablet)
+- Browser name and version
+- Operating system
+- IP address
+- Creation timestamp
+- Last activity timestamp
+
+**Security:**
+- Sessions are stored in MongoDB with user_id isolation
+- JWT tokens expire after 24 hours (configurable)
+- Revoking a session immediately invalidates the JWT
+- Current session cannot be revoked (use logout instead)
+
+**Usage:**
+```bash
+# View sessions in UI
+Settings → Sessions
+
+# Or via API
+curl -H "Authorization: Bearer YOUR_JWT" http://localhost:8000/api/auth/sessions
+```
+
+---
+
+## 💬 AI Chat Assistant
+
+### Interactive Metric Queries
+
+Chat with AI to get insights about your infrastructure:
+
+**Features:**
+- **Natural Language:** Ask questions in plain English
+- **Context-Aware:** AI understands your metrics and history
+- **Session History:** All conversations are saved per user
+- **Multi-Session:** Create multiple chat sessions for different topics
+
+**Example Queries:**
+- "What's the current CPU usage on my servers?"
+- "Show me memory trends for the last hour"
+- "Are there any anomalies I should be concerned about?"
+- "Explain the root cause of the latest incident"
+
+**Access:**
+- Frontend: Dashboard → Chat icon
+- API: `POST /chat` with message payload
 
 ---
 
@@ -545,6 +662,7 @@ cd frontend && npm run dev
 | `email_config` | Email settings | ✅ |
 | `slack_config` | Slack settings | ✅ |
 | `chat_sessions` | AI chat history | ✅ |
+| `auth_sessions` | Active login sessions | ✅ |
 
 All collections (except `users`) include `user_id` field for data isolation.
 
@@ -640,13 +758,21 @@ docker-compose up -d
 - [ ] Set up health check monitoring
 
 ---
+## 📋 License
+
+MIT License - See LICENSE file for details
+
+---
+
 ## 🙏 Acknowledgments
 
 - **FastAPI** - Modern async web framework
 - **React** - Frontend UI library
 - **Prometheus** - Industry-standard metrics
+- **Grafana** - Beautiful metric visualizations
 - **MongoDB** - Flexible document storage
 - **OpenAI** - GPT models for analysis
 - **Langfuse** - LLM observability and cost tracking
 - **Argon2** - Secure password hashing
+- **TailwindCSS** - Utility-first CSS framework
 
