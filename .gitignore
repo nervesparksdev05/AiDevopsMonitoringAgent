@@ -50,6 +50,45 @@ targets.json
 
 # Logs
 *.log
+debug.log
+error.log
+app.log
 
 # Local config
 config.env
+
+# Frontend (Node.js / React)
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/.cache/
+frontend/package-lock.json
+frontend/yarn.lock
+
+# MongoDB data (if running locally)
+mongodb_data/
+mongo_data/
+
+# Docker volumes
+prometheus_data/
+grafana_data/
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+*.bak
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+

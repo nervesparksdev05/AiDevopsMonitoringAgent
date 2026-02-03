@@ -6,15 +6,24 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-6.0+-success.svg)](https://www.mongodb.com/)
 [![React](https://img.shields.io/badge/React-18+-61DAFB.svg)](https://reactjs.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > Production-ready SaaS platform for real-time monitoring with LLM-powered anomaly detection, batch analysis, and intelligent alerting
 
 ---
 
+## 🔥 Recent Updates
+
+### v2.1.0 - February 2026
+- **🤖 OpenAI Integration**: Primary LLM now uses OpenAI (gpt-4o-mini) with automatic fallback to Gemma3
+- **🔄 Intelligent Fallback**: System continues working even if OpenAI is unavailable
+- **🐛 Bug Fix**: Resolved target deletion issue - deleted servers now properly removed from `targets.json`
+- **📊 Enhanced Logging**: Better error tracking and debugging for LLM calls and target management
+
+---
+
 ## 🎯 Overview
 
-AI DevOps Monitor is a complete multi-user monitoring platform that collects Prometheus metrics and uses Large Language Models (LLM) to detect anomalies, identify root causes, and provide actionable remediation steps. Each user has their own isolated workspace with custom monitoring targets and notification settings.
+AI DevOps Monitor is a complete multi-user monitoring platform that collects Prometheus metrics and uses Large Language Models (OpenAI + Gemma3) to detect anomalies, identify root causes, and provide actionable remediation steps. Each user has their own isolated workspace with custom monitoring targets and notification settings.
 
 ### ✨ Key Features
 
@@ -111,28 +120,39 @@ npm run dev
 # ============================================
 PROM_URL=http://localhost:9090
 MONGO_URI=mongodb://localhost:27017
-BATCH_INTERVAL_MINUTES=1
+MONGO_DB=observability
+BATCH_INTERVAL_MINUTES=5
 
 # ============================================
-# LLM PROVIDER (Choose one)
+# LLM CONFIGURATION (Primary + Fallback)
 # ============================================
 
-# Option 1: OpenAI (Recommended for production)
-LLM_PROVIDER=openai
-OPENAI_API_KEY=sk-...
+# Primary LLM: OpenAI (Recommended for production)
+OPENAI_API_KEY=your-openai-api-key-here
 OPENAI_MODEL=gpt-4o-mini
 
-# Option 2: Ollama (Free, local)
-# LLM_PROVIDER=ollama
-# LLM_URL=http://localhost:11434
-# LLM_MODEL=llama3.2
+# Fallback LLM: Gemma3 via Ollama (Automatic fallback if OpenAI fails)
+LLM_URL=http://localhost:11434
+LLM_MODEL=gemma3:1b
+
+# The system will:
+# 1. Try OpenAI first (fast, high quality)
+# 2. Automatically fall back to Gemma3 if OpenAI fails
+# 3. Continue working even if one provider is down
 
 # ============================================
 # AUTHENTICATION
 # ============================================
-JWT_SECRET_KEY=your-secret-key-here-change-in-production
-JWT_ALGORITHM=HS256
-JWT_EXPIRE_MINUTES=1440
+JWT_SECRET_KEY=your-super-secret-jwt-key-change-this-in-production-12345
+ACCESS_TOKEN_EXPIRE_MINUTES=15
+REFRESH_TOKEN_EXPIRE_DAYS=7
+
+# ============================================
+# RATE LIMITING
+# ============================================
+ENABLE_RATE_LIMITING=true
+AUTH_RATE_LIMIT=5/minute
+API_RATE_LIMIT=100/minute
 
 # ============================================
 # EMAIL ALERTS (Optional, per-user config)
@@ -217,6 +237,131 @@ volumes:
 ```
 
 ---
+
+## 📁 Project Structure
+
+```
+fastapi_metrics/
+│
+├── app/                              # Backend application
+│   ├── __init__.py
+│   ├── main.py                       # FastAPI app entry point
+│   │
+│   ├── api/                          # API routes
+│   │   ├── __init__.py
+│   │   └── endpoints/
+│   │       ├── __init__.py
+│   │       ├── auth.py               # Authentication endpoints
+│   │       ├── chat.py               # AI chat assistant
+│   │       ├── config.py             # Email/Slack config
+│   │       ├── metrics.py            # Metrics endpoints
+│   │       ├── session.py            # Session management
+│   │       └── target.py             # Target management
+│   │
+│   ├── core/                         # Core functionality
+│   │   ├── __init__.py
+│   │   ├── auth.py                   # JWT authentication
+│   │   ├── config.py                 # Environment configuration
+│   │   ├── logging.py                # Logging setup
+│   │   └── rate_limit.py             # Rate limiting
+│   │
+│   ├── models/                       # Data models
+│   │   ├── __init__.py
+│   │   ├── anomaly.py
+│   │   ├── batch.py
+│   │   ├── incident.py
+│   │   └── rca.py
+│   │
+│   ├── schemas/                      # Pydantic schemas
+│   │   ├── __init__.py
+│   │   ├── auth.py
+│   │   ├── chat.py
+│   │   ├── config.py
+│   │   ├── target.py
+│   │   └── user.py
+│   │
+│   ├── services/                     # Business logic
+│   │   ├── __init__.py
+│   │   ├── batch_service.py          # Batch monitoring
+│   │   ├── email_service.py          # Email alerts
+│   │   ├── langfuse_service.py       # LLM observability
+│   │   ├── llm_service.py            # OpenAI + Gemma3 LLM calls
+│   │   ├── mongodb_service.py        # Database operations
+│   │   ├── prometheus_service.py     # Prometheus queries
+│   │   └── slack_service.py          # Slack notifications
+│   │
+│   └── migrations/                   # Database migrations
+│       └── migrate_sessions.py
+│
+├── frontend/                         # React frontend
+│   ├── public/
+│   │   └── vite.svg
+│   │
+│   ├── src/
+│   │   ├── assets/                   # Static assets
+│   │   │   └── react.svg
+│   │   │
+│   │   ├── components/               # React components
+│   │   │   ├── Anomalies.jsx
+│   │   │   ├── ChatAssistant.jsx
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── EmailConfig.jsx
+│   │   │   ├── Login.jsx
+│   │   │   ├── MetricsBatches.jsx
+│   │   │   ├── MetricsOverview.jsx
+│   │   │   ├── Navbar.jsx
+│   │   │   ├── ProtectedRoute.jsx
+│   │   │   ├── RCAResults.jsx
+│   │   │   ├── Register.jsx
+│   │   │   ├── ServerSettings.jsx
+│   │   │   └── SessionManagement.jsx
+│   │   │
+│   │   ├── services/                 # API client
+│   │   │   └── api.js
+│   │   │
+│   │   ├── App.jsx                   # Main app component
+│   │   ├── index.css                 # Tailwind CSS v4
+│   │   └── main.jsx                  # React entry point
+│   │
+│   ├── index.html
+│   ├── package.json
+│   ├── postcss.config.js
+│   ├── tailwind.config.js
+│   └── vite.config.js
+│
+├── grafana/                          # Grafana configuration
+│   ├── dashboards/
+│   │   └── server-monitoring.json
+│   └── provisioning/
+│       └── dashboards/
+│           └── dashboard.yml
+│
+├── .env                              # Environment variables
+├── .env.example                      # Example environment file
+├── .gitignore
+├── docker-compose.yml                # Docker services
+├── prometheus.yml                    # Prometheus config
+├── targets.json                      # Dynamic targets (auto-managed)
+├── requirements.txt                  # Python dependencies
+└── README.md                         # This file
+```
+
+### Key Files Explained
+
+| File | Purpose |
+|------|---------|
+| `app/main.py` | FastAPI application entry point, CORS, routes |
+| `app/core/config.py` | Loads all environment variables |
+| `app/core/auth.py` | JWT token creation and validation |
+| `app/services/llm_service.py` | OpenAI (primary) + Gemma3 (fallback) integration |
+| `app/services/batch_service.py` | Periodic metric collection and analysis |
+| `app/api/endpoints/target.py` | Dynamic target management API |
+| `frontend/src/services/api.js` | Centralized API client with auth |
+| `frontend/src/components/Dashboard.jsx` | Main dashboard UI |
+| `targets.json` | Auto-generated Prometheus targets |
+| `prometheus.yml` | Prometheus scrape configuration |
+
+
 
 ## 🏗️ Architecture
 
@@ -481,15 +626,20 @@ Chat with AI to get insights about your infrastructure:
 
 ### LLM-Powered Detection
 
-The system uses **pure AI detection** - no threshold rules or statistical methods:
+The system uses **pure AI detection** with intelligent fallback - no threshold rules or statistical methods:
 
 1. **Fetch Metrics** - Queries Prometheus for user's targets
 2. **Group by Instance** - Organizes metrics by server/service
 3. **Build Prompt** - Creates structured prompt with time window and ALL metrics
-4. **LLM Analysis** - AI analyzes the entire batch and decides what's anomalous
+4. **LLM Analysis** - AI analyzes the entire batch (OpenAI primary, Gemma3 fallback)
 5. **Parse Response** - Extracts incident, anomalies, clusters from JSON
 6. **Store Everything** - Saves to MongoDB with user_id
 7. **Send Alerts** - Notifies via user's configured Email/Slack
+
+**LLM Provider Strategy:**
+- **Primary**: OpenAI (gpt-4o-mini) - Fast, high-quality analysis
+- **Fallback**: Gemma3 (via Ollama) - Automatic fallback if OpenAI fails
+- **Resilience**: System continues working even if one provider is down
 
 ### Why LLM-Only?
 
@@ -743,36 +893,4 @@ docker build -t ai-devops-monitor .
 # Run with docker-compose
 docker-compose up -d
 ```
-
-### Production Checklist
-
-- [ ] Set `ENVIRONMENT=production` in `.env`
-- [ ] Generate strong `JWT_SECRET_KEY`
-- [ ] Configure `FRONTEND_URL` to production domain
-- [ ] Enable MongoDB authentication
-- [ ] Set up HTTPS/SSL certificates
-- [ ] Configure firewall rules
-- [ ] Set up automated backups
-- [ ] Test email/Slack alerts
-- [ ] Monitor application logs
-- [ ] Set up health check monitoring
-
----
-## 📋 License
-
-MIT License - See LICENSE file for details
-
----
-
-## 🙏 Acknowledgments
-
-- **FastAPI** - Modern async web framework
-- **React** - Frontend UI library
-- **Prometheus** - Industry-standard metrics
-- **Grafana** - Beautiful metric visualizations
-- **MongoDB** - Flexible document storage
-- **OpenAI** - GPT models for analysis
-- **Langfuse** - LLM observability and cost tracking
-- **Argon2** - Secure password hashing
-- **TailwindCSS** - Utility-first CSS framework
 

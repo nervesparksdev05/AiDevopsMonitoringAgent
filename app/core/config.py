@@ -15,7 +15,11 @@ MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("MONGO_DB", "observability")
 MAX_DOCS = int(os.getenv("MAX_DOCS", "1000"))
 
-# LLM (gemma3:1b)
+# OpenAI (Primary LLM)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+
+# LLM (gemma3:1b - Fallback)
 LLM_URL = os.getenv("LLM_URL")
 LLM_MODEL = os.getenv("LLM_MODEL", "gemma3:1b")
 

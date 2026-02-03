@@ -43,10 +43,14 @@ def _regenerate_targets_file(db):
             json.dump(file_sd_content, f, indent=2)
             
         logger.info(f"[Targets] Regenerated {TARGETS_FILE} with {len(targets)} targets")
+        logger.debug(f"[Targets] File contents: {file_sd_content}")
         return True
     except Exception as e:
-        logger.error(f"[Targets] Failed to regenerate file: {e}")
-        return False
+        logger.error(f"[Targets] Failed to regenerate file: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update targets file: {str(e)}"
+        )
 
 
 @router.get("/agent/targets", response_model=List[Target])
