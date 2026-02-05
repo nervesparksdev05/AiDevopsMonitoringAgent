@@ -268,33 +268,7 @@ export const api = {
     return fetchJson(`${API_BASE_URL}/langfuse/status`);
   },
 
-  // ============ IP-FILTERED DATA ============
-  // These endpoints remain for internal data filtering
 
-  async getMetricsByIP(ip) {
-    const metrics = await fetchAllPages(`metrics/by-ip?ip=${encodeURIComponent(ip)}`, "metrics");
-    return { metrics };
-  },
-
-  async getAnomaliesByIP(ip) {
-    const anomalies = await fetchAllPages(`anomalies/by-ip?ip=${encodeURIComponent(ip)}`, "anomalies");
-    return { anomalies };
-  },
-
-  async getIncidentsByIP(ip) {
-    const incidents = await fetchAllPages(`incidents/by-ip?ip=${encodeURIComponent(ip)}`, "incidents");
-    return { incidents };
-  },
-
-  async getRCAByIP(ip) {
-    const rca = await fetchAllPages(`rca/by-ip?ip=${encodeURIComponent(ip)}`, "rca");
-    return { rca };
-  },
-
-  async getBatchesByIP(ip) {
-    const batches = await fetchAllPages(`batches/by-ip?ip=${encodeURIComponent(ip)}`, "batches");
-    return { batches };
-  },
 
   async getBatches() {
     const batches = await fetchAllPages("batches", "batches");
